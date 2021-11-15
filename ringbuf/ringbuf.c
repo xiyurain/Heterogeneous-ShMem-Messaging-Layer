@@ -27,7 +27,7 @@ MODULE_VERSION("1.0");
 #define TRUE 1
 #define FALSE 0
 #define RINGBUF_DEVICE_MINOR_NR 0
-#define RINGBUF_DEV_ROLE Consumer
+#define RINGBUF_DEV_ROLE Producer
 #define BUF_INFO_SZ sizeof(ringbuf_info)
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
@@ -146,7 +146,7 @@ static struct pci_driver ringbuf_pci_driver = {
 
 static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_t *offset)
 {
-	ringbuf_info buf_info;
+	ringbuf_info buf_info, *buf_info_pointer_to_device;
 	unsigned int bytes_uncopied = 0;
 	unsigned int space = 0;
 
@@ -162,6 +162,7 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_
 	// update the position of in pointer
 	// buf_info = (ringbuf_info*)ringbuf_dev.base_addr;
 	memcpy(&buf_info, ringbuf_dev.base_addr, BUF_INFO_SZ);
+	buf_info_pointer_to_device = (ringbuf_info*)ringbuf_dev.base_addr;
 
 	/*----------------- Start to copy ---------------------*/
 	/* out - in, the largest length for reading */
@@ -201,19 +202,19 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_
 
 	/*-------------- finishing the copy---------------------*/
 	buf_info.out += len;
-	memcpy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
+	buf_info_pointer_to_device->out = buf_info.out;
 	return len;
 
 	/* handle error, if the copy is incomplete*/
 copy_err:
-	memcpy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
+	buf_info_pointer_to_device->out = buf_info.out;
 	return -EFAULT;
 }
 
 static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len, loff_t *offset)
 {
 
-	ringbuf_info buf_info;
+	ringbuf_info buf_info, *buf_info_pointer_to_device;
 	unsigned int bytes_uncopied = 0;
 	unsigned int space = 0;
 
@@ -229,6 +230,7 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len
 	// update the position of out pointer
 	// buf_info = (ringbuf_info*)ringbuf_dev.base_addr;
 	memcpy(&buf_info, ringbuf_dev.base_addr, RINGBUF_SZ);
+	buf_info_pointer_to_device = (ringbuf_info*)ringbuf_dev.base_addr;
 
 	/*----------------- Start to copy ---------------------*/
 	/* sz - (in - out), the largest length for writing */
@@ -268,12 +270,12 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len
 
 	/*-------------- finishing the copy---------------------*/
 	buf_info.in += len;
-	memcpy(ringbuf_dev.base_addr, &buf_info, RINGBUF_SZ);
+	buf_info_pointer_to_device->in = buf_info.in;
 	return len;
 
 	/* handle error, if the copy is incomplete*/
 copy_err:
-	memcpy(ringbuf_dev.base_addr, &buf_info, RINGBUF_SZ);
+	buf_info_pointer_to_device->in = buf_info.in;
 	return -EFAULT;
 }
 
@@ -340,11 +342,13 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	memcpy(&buf_info, ringbuf_dev.base_addr, BUF_INFO_SZ);
 	
 	if(buf_info.size != BUF_INFO_SZ) {
+		printk(KERN_INFO "buf_info.size=%d\n", buf_info.size);
 		printk(KERN_INFO "RINGBUF at %x buffer not initialized yet. Start initialization...\n", ringbuf_dev.ioaddr);
 		buf_info.in = buf_info.out = 0;
 		buf_info.buf_addr = ringbuf_dev.base_addr + BUF_INFO_SZ;
 		buf_info.size = BUF_INFO_SZ;
 		memcpy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
+		printk(KERN_INFO "RINGBUF: Initialization finished.");
 	}
 
 

@@ -1,0 +1,1 @@
+qemu-system-x86_64 -m 1024M -drive format=raw,file=rootfs.img -kernel ../images/bzImage -append "root=/dev/sda init=/bin/ash" -object memory-backend-file,size=4M,share,mem-path=/dev/shm/ivshmem,id=hostmem -device ivshmem-plain,memdev=hostmem
