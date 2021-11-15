@@ -13,7 +13,7 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/proc_fs.h>
-#include <linux/smp_lock.h>
+// #include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
@@ -76,34 +76,33 @@ typedef struct ringbuf_device
 	unsigned int enabled;
 } ringbuf_device;
 
-static const struct file_operations ringbuf_ops = {
-	.owner		= 	THIS_MODULE,
-	.open		= 	ringbuf_open,
-	//.mmap		= 	ringbuf_mmap,
-	.read		= 	ringbuf_read,
-	.ioctl   	= 	ringbuf_ioctl,
-	.write   	= 	ringbuf_write,
-	//.llseek  	=	ringbuf_lseek,
-	.release 	= 	ringbuf_release,
-};
 
-static int __init ringbuf_init(void)
+static int __init ringbuf_init(void);
 static void __exit ringbuf_cleanup(void);
-static int ringbuf_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
+// static int ringbuf_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
 //static int ringbuf_mmap(struct file *, struct vm_area_struct *);
 static int ringbuf_open(struct inode *, struct file *);
 static int ringbuf_release(struct inode *, struct file *);
-static int ringbuf_read(struct file *, char *, size_t);
-static int ringbuf_write(struct file *, const char *, size_t);
+static ssize_t ringbuf_read(struct file *, char *, size_t, loff_t *);
+static ssize_t ringbuf_write(struct file *, const char *, size_t, loff_t *);
 //static loff_t ringbuf_lseek(struct file * filp, loff_t offset, int origin);
 
-static int ringbuf_device_major_nr;
 static ringbuf_device ringbuf_dev;
 // static int event_num;
 // static struct semaphore sema;
 // static wait_queue_head_t wait_queue;
 
 static int device_major_nr;
+static const struct file_operations ringbuf_ops = {
+	.owner		= 	THIS_MODULE,
+	.open		= 	ringbuf_open,
+	//.mmap		= 	ringbuf_mmap,
+	.read		= 	ringbuf_read,
+	// .ioctl   	= 	ringbuf_ioctl,
+	.write   	= 	ringbuf_write,
+	//.llseek  	=	ringbuf_lseek,
+	.release 	= 	ringbuf_release,
+};
 /*end-------------ringbuf device and its file operations----------*/
 
 
@@ -129,23 +128,23 @@ static struct pci_driver ringbuf_pci_driver = {
 
 
 /*START---------------------Implementation of ringbuf_device------------------*/
-static int ringbuf_ioctl(struct inode * ino, struct file * filp,
-			unsigned int cmd, unsigned long arg)
-{
-	int rv;
-	uint32_t msg;
+// static int ringbuf_ioctl(struct inode * ino, struct file * filp,
+// 			unsigned int cmd, unsigned long arg)
+// {
+// 	int rv;
+// 	uint32_t msg;
 
-	printk("RINGBUF: args is %ld\n", arg);
-#if 0
-	switch (cmd) {
+// 	printk("RINGBUF: args is %ld\n", arg);
+// #if 0
+// 	switch (cmd) {
 
-			printk("RINGBUF: bad ioctl (\n");
-	}
-#endif
-	return 0;
-}
+// 			printk("RINGBUF: bad ioctl (\n");
+// 	}
+// #endif
+// 	return 0;
+// }
 
-static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len)
+static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_t *offset)
 {
 	ringbuf_info buf_info;
 	unsigned int bytes_uncopied = 0;
@@ -162,7 +161,7 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len)
 	}
 	// update the position of in pointer
 	// buf_info = (ringbuf_info*)ringbuf_dev.base_addr;
-	memcopy(&buf_info, ringbuf_dev.base_addr, BUF_INFO_SZ);
+	memcpy(&buf_info, ringbuf_dev.base_addr, BUF_INFO_SZ);
 
 	/*----------------- Start to copy ---------------------*/
 	/* out - in, the largest length for reading */
@@ -202,16 +201,16 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len)
 
 	/*-------------- finishing the copy---------------------*/
 	buf_info.out += len;
-	memcopy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
+	memcpy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
 	return len;
 
 	/* handle error, if the copy is incomplete*/
 copy_err:
-	memcopy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
+	memcpy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
 	return -EFAULT;
 }
 
-static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len)
+static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len, loff_t *offset)
 {
 
 	ringbuf_info buf_info;
@@ -229,7 +228,7 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len
 	}
 	// update the position of out pointer
 	// buf_info = (ringbuf_info*)ringbuf_dev.base_addr;
-	memcopy(&buf_info, ringbuf_dev.base_addr, RINGBUF_SZ);
+	memcpy(&buf_info, ringbuf_dev.base_addr, RINGBUF_SZ);
 
 	/*----------------- Start to copy ---------------------*/
 	/* sz - (in - out), the largest length for writing */
@@ -269,12 +268,12 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len
 
 	/*-------------- finishing the copy---------------------*/
 	buf_info.in += len;
-	memcopy(ringbuf_dev.base_addr, &buf_info, RINGBUF_SZ);
+	memcpy(ringbuf_dev.base_addr, &buf_info, RINGBUF_SZ);
 	return len;
 
 	/* handle error, if the copy is incomplete*/
 copy_err:
-	memcopy(ringbuf_dev.base_addr, &buf_info, RINGBUF_SZ);
+	memcpy(ringbuf_dev.base_addr, &buf_info, RINGBUF_SZ);
 	return -EFAULT;
 }
 
@@ -305,6 +304,7 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 					const struct pci_device_id * ent) {
 
 	int result;
+	ringbuf_info buf_info;
 
 	printk("RINGBUF: Probing for ringbuf Device\n");
 
@@ -337,15 +337,14 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	printk(KERN_INFO "RINGBUF: ioaddr = %x ioaddr_size = %d\n",
 						ringbuf_dev.ioaddr, ringbuf_dev.ioaddr_size);
 
-	ringbuf_info buf_info;
-	memcopy(&buf_info, ringbuf_dev.base_addr, BUF_INFO_SZ);
+	memcpy(&buf_info, ringbuf_dev.base_addr, BUF_INFO_SZ);
 	
 	if(buf_info.size != BUF_INFO_SZ) {
-		printk(KERN_INFO "RINGBUF at %x buffer not initialized yet. Start initialization...\n");
+		printk(KERN_INFO "RINGBUF at %x buffer not initialized yet. Start initialization...\n", ringbuf_dev.ioaddr);
 		buf_info.in = buf_info.out = 0;
 		buf_info.buf_addr = ringbuf_dev.base_addr + BUF_INFO_SZ;
 		buf_info.size = BUF_INFO_SZ;
-		memcopy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
+		memcpy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
 	}
 
 
@@ -387,8 +386,8 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 
 	return 0;
 
-reg_release:
-	pci_iounmap(pdev, ringbuf_dev.base_addr);
+// reg_release:
+// 	pci_iounmap(pdev, ringbuf_dev.base_addr);
 pci_release:
 	pci_release_regions(pdev);
 pci_disable:
@@ -427,7 +426,7 @@ static int __init ringbuf_init (void)
 		return err;
 	}
 	device_major_nr = err;
-	printk("KVM_IVSHMEM: Major device number is: %d\n", device_major_nr);
+	printk("RINGBUF: Major device number is: %d\n", device_major_nr);
 	ringbuf_dev.enabled=FALSE;
 
 	err = pci_register_driver(&ringbuf_pci_driver);

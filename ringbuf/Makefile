@@ -1,5 +1,5 @@
 ifneq ($(KERNELRELEASE),)
-	obj-m := hello.o
+	obj-m := ringbuf.o
 
 else
 	KERNELDIR ?= /home/popcorn/kernel_src/linux-5.15.1/
