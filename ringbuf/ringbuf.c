@@ -8,12 +8,12 @@
  * 
  */
 
+#include <linux/kfifo.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/proc_fs.h>
-// #include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <linux/interrupt.h>
 #include <linux/mutex.h>
@@ -31,16 +31,16 @@ MODULE_VERSION("1.0");
 #define BUF_INFO_SZ sizeof(ringbuf_info)
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
+/* KVM Inter-VM shared memory device register offsets */
 enum {
-	/* KVM Inter-VM shared memory device register offsets */
 	IntrMask        = 0x00,    /* Interrupt Mask */
 	IntrStatus      = 0x04,    /* Interrupt Status */
 	IVPosition      = 0x08,    /* VM ID */
 	Doorbell        = 0x0c,    /* Doorbell */
 };
 
+/* Consumer(read) or Producer(write) role of ring buffer*/
 enum {
-	/* Consumer(read) or Producer(write) role of ring buffer*/
 	Consumer	= 	0,
 	Producer	=	1,
 };
@@ -48,21 +48,20 @@ enum {
 
 
 /*START--------------------------------------- ringbuf device and its file operations */
-// the read/write pointer of ring buffer
-typedef struct ringbuf_info
-{
-	unsigned int in;
-	unsigned int out;
-	unsigned int size;
-	void * buf_addr;
-} ringbuf_info;
 
+/*
+ * @base_addr: mapped start address of IVshmem space
+ * @regaddr: physical address of shmem PCIe dev regs
+ * @ioaddr: physical address of IVshmem IO space
+ * @fifo_addr: address of the Kfifo struct
+ * @payloads_list: a linklist of the msg payloads
+*/
 typedef struct ringbuf_device
 {
-	struct pci_dev* dev;
-	void __iomem* regs;
+	struct pci_dev *dev;
+	void __iomem *egs;
 
-	void * base_addr;
+	void* base_addr;
 
 	unsigned int regaddr;
 	unsigned int reg_size;
@@ -70,7 +69,11 @@ typedef struct ringbuf_device
 	unsigned int ioaddr;
 	unsigned int ioaddr_size;
 	unsigned int irq;
+
+	kfifo* fifo_addr;
 	unsigned int bufsize;
+
+	void* payloads_list;
 	
 	unsigned int role;
 	unsigned int enabled;
@@ -79,13 +82,11 @@ typedef struct ringbuf_device
 
 static int __init ringbuf_init(void);
 static void __exit ringbuf_cleanup(void);
-// static int ringbuf_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
-//static int ringbuf_mmap(struct file *, struct vm_area_struct *);
 static int ringbuf_open(struct inode *, struct file *);
 static int ringbuf_release(struct inode *, struct file *);
 static ssize_t ringbuf_read(struct file *, char *, size_t, loff_t *);
 static ssize_t ringbuf_write(struct file *, const char *, size_t, loff_t *);
-//static loff_t ringbuf_lseek(struct file * filp, loff_t offset, int origin);
+// static int ringbuf_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
 
 static ringbuf_device ringbuf_dev;
 // static int event_num;
@@ -96,12 +97,10 @@ static int device_major_nr;
 static const struct file_operations ringbuf_ops = {
 	.owner		= 	THIS_MODULE,
 	.open		= 	ringbuf_open,
-	//.mmap		= 	ringbuf_mmap,
 	.read		= 	ringbuf_read,
-	// .ioctl   	= 	ringbuf_ioctl,
 	.write   	= 	ringbuf_write,
-	//.llseek  	=	ringbuf_lseek,
 	.release 	= 	ringbuf_release,
+	// .ioctl   	= 	ringbuf_ioctl,
 };
 /*end-------------ringbuf device and its file operations----------*/
 
@@ -146,137 +145,13 @@ static struct pci_driver ringbuf_pci_driver = {
 
 static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_t *offset)
 {
-	ringbuf_info buf_info, *buf_info_pointer_to_device;
-	unsigned int bytes_uncopied = 0;
-	unsigned int space = 0;
-
-	/* if the device role is not Consumer, than not allowed to read */
-	if(ringbuf_dev.role != Consumer) {
-		printk(KERN_ERR "ringbuf: not allowed to read \n");
-		return 0;
-	}
-	if (!ringbuf_dev.base_addr) {
-		printk(KERN_ERR "ringbuf: cannot read from ioaddr (NULL)\n");
-		return 0;
-	}
-	// update the position of in pointer
-	// buf_info = (ringbuf_info*)ringbuf_dev.base_addr;
-	memcpy(&buf_info, ringbuf_dev.base_addr, BUF_INFO_SZ);
-	buf_info_pointer_to_device = (ringbuf_info*)ringbuf_dev.base_addr;
-
-	/*----------------- Start to copy ---------------------*/
-	/* out - in, the largest length for reading */
-	len = MIN(len, (buf_info.out - buf_info.in));
-	if(len == 0) 
-		return 0;
-
-	/* sz - (out % sz), the largest space for a single time of read */
-	space = MIN(len, (RINGBUF_SZ - (buf_info.out & (RINGBUF_SZ - 1))));
-
-	// copy first part of the data to user buffer
-	bytes_uncopied = copy_to_user(
-		buffer, 
-		buf_info.buf_addr + (buf_info.out & (RINGBUF_SZ - 1)), 
-		space);
-
-	//if the copy is incomplete	
-	if(bytes_uncopied > 0) {
-		// buf_info.out += (space - bytes_uncopied);
-		goto copy_err;
-	}
-
-	/*-----------optional: second part of copy--------------*/
-	if((len - space) > 0) {
-		// copy second part of the data to user buffer
-		bytes_uncopied = copy_to_user(
-			buffer + space, 
-			buf_info.buf_addr, 
-			len - space);
-		
-		//if the copy is incomplete	
-		if(bytes_uncopied > 0) {
-			// buf_info.out += (len - bytes_uncopied);
-			goto copy_err;
-		}
-	}
-
-	/*-------------- finishing the copy---------------------*/
-	buf_info.out += len;
-	buf_info_pointer_to_device->out = buf_info.out;
-	return len;
-
-	/* handle error, if the copy is incomplete*/
-copy_err:
-	buf_info_pointer_to_device->out = buf_info.out;
-	return -EFAULT;
+	
 }
 
 static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len, loff_t *offset)
 {
 
-	ringbuf_info buf_info, *buf_info_pointer_to_device;
-	unsigned int bytes_uncopied = 0;
-	unsigned int space = 0;
-
-	/* if the device role is not Consumer, than not allowed to read */
-	if(ringbuf_dev.role != Producer) {
-		printk(KERN_ERR "ringbuf: not allowed to write \n");
-		return 0;
-	}
-	if (!ringbuf_dev.base_addr) {
-		printk(KERN_ERR "ringbuf: cannot write from ioaddr (NULL)\n");
-		return 0;
-	}
-	// update the position of out pointer
-	// buf_info = (ringbuf_info*)ringbuf_dev.base_addr;
-	memcpy(&buf_info, ringbuf_dev.base_addr, RINGBUF_SZ);
-	buf_info_pointer_to_device = (ringbuf_info*)ringbuf_dev.base_addr;
-
-	/*----------------- Start to copy ---------------------*/
-	/* sz - (in - out), the largest length for writing */
-	len = MIN(len, RINGBUF_SZ - (buf_info.in - buf_info.out));
-	if(len == 0) 
-		return 0;
-
-	/* sz - (in % sz), the largest space for a single time of write */
-	space = MIN(len, (RINGBUF_SZ - (buf_info.in & (RINGBUF_SZ - 1))));
-
-	// copy first part of the data from user buffer
-	bytes_uncopied = copy_from_user( 
-		buf_info.buf_addr + (buf_info.in & (RINGBUF_SZ - 1)), 
-		buffer,
-		space);
-
-	//if the copy is incomplete	
-	if(bytes_uncopied > 0) {
-		// buf_info.in += (space - bytes_uncopied);
-		goto copy_err;
-	}
-
-	/*-----------optional: second part of copy--------------*/
-	if((len - space) > 0) {
-		// copy second part of the data from user buffer
-		bytes_uncopied = copy_to_user( 
-			buf_info.buf_addr, 
-			buffer + space,
-			len - space);
-		
-		//if the copy is incomplete	
-		if(bytes_uncopied > 0) {
-			// buf_info.in += (len - bytes_uncopied);
-			goto copy_err;
-		}
-	}
-
-	/*-------------- finishing the copy---------------------*/
-	buf_info.in += len;
-	buf_info_pointer_to_device->in = buf_info.in;
-	return len;
-
-	/* handle error, if the copy is incomplete*/
-copy_err:
-	buf_info_pointer_to_device->in = buf_info.in;
-	return -EFAULT;
+	
 }
 
 
@@ -290,11 +165,28 @@ static int ringbuf_open(struct inode * inode, struct file * filp)
 	  return -ENODEV;
    }
 
+	printk(KERN_INFO "Check if the ring buffer is already init");
+	if(kfifo_esize(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
+		
+		printk(KERN_INFO "Start to init the ring buffer\n");
+		kfifo_alloc(ringbuf_dev, RINGBUF_SZ, GFP_KERNEL);
+
+	}
+
+	printk(KERN_INFO "Check if the payloads linklist is already init");
+	// TODO: init with the list struct
+
    return 0;
 }
 
 static int ringbuf_release(struct inode * inode, struct file * filp)
 {
+	if(ringbuf_dev.kfifo_addr != NULL) {
+		//TODO: free the payloads linklist
+
+		printk(KERN_INFO "ring buffer is being freed");
+		kfifo_free(ringbuf_dev.fifo_addr);
+	}
 
    return 0;
 }
@@ -338,19 +230,6 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 
 	printk(KERN_INFO "RINGBUF: ioaddr = %x ioaddr_size = %d\n",
 						ringbuf_dev.ioaddr, ringbuf_dev.ioaddr_size);
-
-	memcpy(&buf_info, ringbuf_dev.base_addr, BUF_INFO_SZ);
-	
-	if(buf_info.size != BUF_INFO_SZ) {
-		printk(KERN_INFO "buf_info.size=%d\n", buf_info.size);
-		printk(KERN_INFO "RINGBUF at %x buffer not initialized yet. Start initialization...\n", ringbuf_dev.ioaddr);
-		buf_info.in = buf_info.out = 0;
-		buf_info.buf_addr = ringbuf_dev.base_addr + BUF_INFO_SZ;
-		buf_info.size = BUF_INFO_SZ;
-		memcpy(ringbuf_dev.base_addr, &buf_info, BUF_INFO_SZ);
-		printk(KERN_INFO "RINGBUF: Initialization finished.");
-	}
-
 
 	/* The part of BAR0 and BAR1 TODO
 
