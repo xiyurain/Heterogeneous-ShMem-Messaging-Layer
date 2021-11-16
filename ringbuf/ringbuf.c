@@ -24,11 +24,13 @@ MODULE_DESCRIPTION("ring buffer based on Inter-VM shared memory module");
 MODULE_VERSION("1.0");
 
 #define RINGBUF_SZ 4096
+#define RINGBUF_MSG_SZ sizeof(rbmsg)
+#define BUF_INFO_SZ sizeof(ringbuf_info)
 #define TRUE 1
 #define FALSE 0
 #define RINGBUF_DEVICE_MINOR_NR 0
 #define RINGBUF_DEV_ROLE Producer
-#define BUF_INFO_SZ sizeof(ringbuf_info)
+#define QEMU_PROCESS_ID 1
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
 /* KVM Inter-VM shared memory device register offsets */
@@ -45,17 +47,27 @@ enum {
 	Producer	=	1,
 };
 
+/*
+ * message sent via ring buffer, as header of the payloads
+*/
+typedef struct ringbuf_msg_hd
+{
+	unsigned int src_qid;
 
+	unsigned int payload_off;
+	ssize_t payload_len;
+} rbmsg_hd;
 
-/*START--------------------------------------- ringbuf device and its file operations */
+/*--------------------------------------- ringbuf device and its file operations */
 
 /*
  * @base_addr: mapped start address of IVshmem space
  * @regaddr: physical address of shmem PCIe dev regs
  * @ioaddr: physical address of IVshmem IO space
  * @fifo_addr: address of the Kfifo struct
- * @payloads_list: a linklist of the msg payloads
+ * @payloads_st: start address of the payloads area
 */
+
 typedef struct ringbuf_device
 {
 	struct pci_dev *dev;
@@ -73,7 +85,7 @@ typedef struct ringbuf_device
 	kfifo* fifo_addr;
 	unsigned int bufsize;
 
-	void* payloads_list;
+	void* payloads_st;
 	
 	unsigned int role;
 	unsigned int enabled;
@@ -89,6 +101,7 @@ static ssize_t ringbuf_write(struct file *, const char *, size_t, loff_t *);
 // static int ringbuf_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
 
 static ringbuf_device ringbuf_dev;
+static unsigned int payload_pt;
 // static int event_num;
 // static struct semaphore sema;
 // static wait_queue_head_t wait_queue;
@@ -102,10 +115,9 @@ static const struct file_operations ringbuf_ops = {
 	.release 	= 	ringbuf_release,
 	// .ioctl   	= 	ringbuf_ioctl,
 };
-/*end-------------ringbuf device and its file operations----------*/
 
 
-/*start---------------------- Inter-VM shared memory PCI device------- */
+/*---------------------- Inter-VM shared memory PCI device------- */
 static struct pci_device_id ringbuf_id_table[] = {
 	{ 0x1af4, 0x1110, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0 },
@@ -122,11 +134,10 @@ static struct pci_driver ringbuf_pci_driver = {
 	.probe	   = ringbuf_probe_device,
 	.remove	  = ringbuf_remove_device,
 };
-/*end-------------Inter-VM shared memory PCI device---------------*/
 
 
 
-/*START---------------------Implementation of ringbuf_device------------------*/
+/*---------------------Implementation of ringbuf_device------------------*/
 // static int ringbuf_ioctl(struct inode * ino, struct file * filp,
 // 			unsigned int cmd, unsigned long arg)
 // {
@@ -145,25 +156,88 @@ static struct pci_driver ringbuf_pci_driver = {
 
 static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_t *offset)
 {
-	
+	rbmsg_hd hd;
+	unsigned int msgread_len;
+
+	/* if the device role is not Consumer, than not allowed to read */
+	if(ringbuf_dev.role != Consumer) {
+		printk(KERN_ERR "ringbuf: not allowed to read \n");
+		return 0;
+	}
+	if(!ringbuf_dev.base_addr || !ringbuf_dev.fifo_addr) {
+		printk(KERN_ERR "ringbuf: cannot read from addr (NULL)\n");
+		return 0;
+	}
+	if(kfifo_len(ringbuf_dev.fifo_addr) < RINGBUF_MSG_SZ) {
+		printk(KERN_ERR "no msg in ring buffer\n");
+		return 0;
+	}
+
+	msgread_len = kfifo_out(ringbuf_dev.fifo_addr, &hd, RINGBUF_MSG_SZ);
+	if(hd.src_qid != QEMU_PROCESS_ID) {
+		printk(KERN_ERR "invalid ring buffer msg\n");
+		goto err;
+	}
+
+	rmb();
+
+	memcpy(buffer, ringbuf_dev.payload_st + hd.payload_off, 
+			MIN(len, hd.payload_len));
+	return 0;
+
+err:
+	return -EFAULT;
 }
 
 static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len, loff_t *offset)
 {
+	rbmsg_hd hd;
+	unsigned int msgsent_len;
 
+	if(ringbuf_dev.role != Producer) {
+		printk(KERN_ERR "ringbuf: not allowed to write \n");
+		return 0;
+	}
+	if(!ringbuf_dev.base_addr || !ringbuf_dev.fifo_addr) {
+		printk(KERN_ERR "ringbuf: cannot read from addr (NULL)\n");
+		return 0;
+	}
+	if(kfifo_avail(ringbuf_dev.fifo_addr) < RINGBUF_MSG_SZ) {
+		printk(KERN_ERR "not enough space in ring buffer\n");
+		return 0;
+	}
+
+	hd.src_qid = QEMU_PROCESS_ID;
+	hd.payload_off = payload_pt;
+	hd.payload_len = len;
 	
+	memcpy(ringbuf_dev.payloads_st + hd.payload_off, buffer, len);
+
+	wmb();
+
+	msgsent_len = kfifo_in(ringbuf_dev.fifo_addr, &hd, RINGBUF_MSG_SZ);
+	if(msgsent_len != RINGBUF_MSG_SZ) {
+		printk(KERN_ERR "ring buffer msg incomplete! only %d sent\n", msgsent_len);
+		goto err;
+	}
+
+	payload_pt += len;
+	return 0;
+
+err:
+	return -EFAULT;
 }
 
 
 static int ringbuf_open(struct inode * inode, struct file * filp)
 {
 
-   printk(KERN_INFO "Opening ringbuf device\n");
+	printk(KERN_INFO "Opening ringbuf device\n");
 
-   if (MINOR(inode->i_rdev) != RINGBUF_DEVICE_MINOR_NR) {
-	  printk(KERN_INFO "minor number is %d\n", RINGBUF_DEVICE_MINOR_NR);
-	  return -ENODEV;
-   }
+	if (MINOR(inode->i_rdev) != RINGBUF_DEVICE_MINOR_NR) {
+		printk(KERN_INFO "minor number is %d\n", RINGBUF_DEVICE_MINOR_NR);
+		return -ENODEV;
+	}
 
 	printk(KERN_INFO "Check if the ring buffer is already init");
 	if(kfifo_esize(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
@@ -175,6 +249,7 @@ static int ringbuf_open(struct inode * inode, struct file * filp)
 
 	printk(KERN_INFO "Check if the payloads linklist is already init");
 	// TODO: init with the list struct
+	payload_pt = 0;
 
    return 0;
 }
@@ -183,14 +258,13 @@ static int ringbuf_release(struct inode * inode, struct file * filp)
 {
 	if(ringbuf_dev.kfifo_addr != NULL) {
 		//TODO: free the payloads linklist
-
+		payload_pt = 0;
 		printk(KERN_INFO "ring buffer is being freed");
 		kfifo_free(ringbuf_dev.fifo_addr);
 	}
 
    return 0;
 }
-/*END---------------------Implementation of ringbuf_device------------------*/
 
 
 /*START---------------------Implementation of pci_device------------------*/
@@ -230,6 +304,9 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 
 	printk(KERN_INFO "RINGBUF: ioaddr = %x ioaddr_size = %d\n",
 						ringbuf_dev.ioaddr, ringbuf_dev.ioaddr_size);
+
+	ringbuf_dev.fifo_addr = (kfifo*)ringbuf_dev.base_addr;
+	ringbuf_dev.payloads_st = ringbuf_dev.base_addr + sizeof(kfifo);	
 
 	/* The part of BAR0 and BAR1 TODO
 
