@@ -102,11 +102,15 @@ static ssize_t ringbuf_write(struct file *, const char *, size_t, loff_t *);
 
 static ringbuf_device ringbuf_dev;
 static unsigned int payload_pt;
-// static int event_num;
-// static struct semaphore sema;
-// static wait_queue_head_t wait_queue;
+
+static int event_num;
+static struct semaphore sema;
+static wait_queue_head_t wait_queue;
 
 static int device_major_nr;
+
+enum ivshmem_ioctl { set_sema, down_sema, empty, wait_event, wait_event_irq, read_ivposn, read_livelist, sema_irq };
+
 static const struct file_operations ringbuf_ops = {
 	.owner		= 	THIS_MODULE,
 	.open		= 	ringbuf_open,
@@ -153,6 +157,32 @@ static struct pci_driver ringbuf_pci_driver = {
 // #endif
 // 	return 0;
 // }
+
+
+static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
+{
+	struct ringbuf_device * dev = dev_instance;
+	u32 status;
+
+	if (unlikely(dev == NULL))
+		return IRQ_NONE;
+
+	status = readl(dev->regs + IntrStatus);
+	if (!status || (status == 0xFFFFFFFF))
+		return IRQ_NONE;
+
+	if (status == sema_irq) {
+		up(&sema);
+	} else if (status == wait_event_irq) {
+		event_num = 1;
+		wake_up_interruptible(&wait_queue);
+	}
+
+	printk(KERN_INFO "RINGBUF: interrupt (status = 0x%04x)\n",
+		   status);
+
+	return IRQ_HANDLED;
+}
 
 static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_t *offset)
 {
@@ -267,7 +297,55 @@ static int ringbuf_release(struct inode * inode, struct file * filp)
 }
 
 
-/*START---------------------Implementation of pci_device------------------*/
+/*---------------------Implementation of pci_device------------------*/
+
+static int request_msix_vectors(struct kvm_ivshmem_device *ivs_info, int nvectors)
+{
+	int i, err;
+	const char *name = "ivshmem";
+
+	printk(KERN_INFO "devname is %s\n", name);
+	ivs_info->nvectors = nvectors;
+
+
+	ivs_info->msix_entries = kmalloc(nvectors * sizeof *ivs_info->msix_entries,
+					   GFP_KERNEL);
+	ivs_info->msix_names = kmalloc(nvectors * sizeof *ivs_info->msix_names,
+					 GFP_KERNEL);
+
+	for (i = 0; i < nvectors; ++i)
+		ivs_info->msix_entries[i].entry = i;
+
+	err = pci_enable_msix(ivs_info->dev, ivs_info->msix_entries,
+					ivs_info->nvectors);
+	if (err > 0) {
+		printk(KERN_INFO "no MSI. Back to INTx.\n");
+		return -ENOSPC;
+	}
+
+	if (err) {
+		printk(KERN_INFO "some error below zero %d\n", err);
+		return err;
+	}
+
+	for (i = 0; i < nvectors; i++) {
+
+		snprintf(ivs_info->msix_names[i], sizeof *ivs_info->msix_names,
+		 "%s-config", name);
+
+		err = request_irq(ivs_info->msix_entries[i].vector,
+				  kvm_ivshmem_interrupt, 0,
+				  ivs_info->msix_names[i], ivs_info);
+
+		if (err) {
+			printk(KERN_INFO "couldn't allocate irq for msi-x entry %d with vector %d\n", i, ivs_info->msix_entries[i].vector);
+			return -ENOSPC;
+		}
+	}
+
+	return 0;
+}
+
 static int ringbuf_probe_device (struct pci_dev *pdev,
 					const struct pci_device_id * ent) {
 
@@ -308,7 +386,7 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	ringbuf_dev.fifo_addr = (kfifo*)ringbuf_dev.base_addr;
 	ringbuf_dev.payloads_st = ringbuf_dev.base_addr + sizeof(kfifo);	
 
-	/* The part of BAR0 and BAR1 TODO
+	/* The part of BAR0 and BAR1 */
 
 	ringbuf_dev.regaddr =  pci_resource_start(pdev, 0);
 	ringbuf_dev.reg_size = pci_resource_len(pdev, 0);
@@ -322,10 +400,8 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 		goto reg_release;
 	}
 
-	// set all masks to on 
 	writel(0xffffffff, ringbuf_dev.regs + IntrMask);
 
-	// by default initialize semaphore to 
 	sema_init(&sema, 0);
 
 	init_waitqueue_head(&wait_queue);
@@ -342,7 +418,7 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	} else {
 		printk(KERN_INFO "MSI-X enabled\n");
 	}
-	*/
+	
 
 	return 0;
 
