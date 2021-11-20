@@ -32,7 +32,7 @@ MODULE_DESCRIPTION("ring buffer based on Inter-VM shared memory module");
 MODULE_VERSION("1.0");
 
 #define RINGBUF_SZ 4096
-#define RINGBUF_MSG_SZ sizeof(rbmsg)
+#define RINGBUF_MSG_SZ sizeof(rbmsg_hd)
 #define BUF_INFO_SZ sizeof(ringbuf_info)
 #define TRUE 1
 #define FALSE 0
@@ -73,6 +73,8 @@ typedef struct ringbuf_msg_hd
 	ssize_t payload_len;
 } rbmsg_hd;
 
+typedef struct kfifo kfifo;
+
 /*--------------------------------------- ringbuf device and its file operations */
 
 /*
@@ -91,7 +93,7 @@ typedef struct ringbuf_device
 	u8 					revision;
 	unsigned int 		ivposition;
 
-	void __iomem 		*regs;
+	void __iomem 		*regs_addr;
 	void __iomem 		*base_addr;
 
 	unsigned int 		bar0_addr;
@@ -178,7 +180,7 @@ static long ringbuf_ioctl(struct file *filp, unsigned int cmd, unsigned int valu
         ivposition = value & 0xffff0000 >> 16;
         printk(KERN_INFO "ring bell: value: %u(0x%x), vector: %u, peer id: %u\n",
                 value, value, vector, ivposition);
-        writel(value & 0xffffffff, dev->regs_addr + DOORBELL_OFF);
+        writel(value & 0xffffffff, dev->regs_addr + DOORBELL_REG_OFF);
         break;
 
     case IOCTL_WAIT:
@@ -258,7 +260,7 @@ static int request_msix_vectors(struct ringbuf_device *dev, int n)
 
     for (i = 0; i < dev->nvectors; i++) {
         snprintf(dev->msix_names[i], sizeof(*dev->msix_names),
-                "%s%d-%d", DRV_NAME, dev->minor, i);
+                "%s%d-%d", "ringbuf", dev->minor, i);
 
         ret = request_irq(dev->msix_entries[i].vector,
                 ringbuf_interrupt, 0, dev->msix_names[i], dev);
@@ -333,7 +335,7 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_
 
 	rmb();
 
-	memcpy(buffer, ringbuf_dev.payload_st + hd.payload_off, 
+	memcpy(buffer, ringbuf_dev.payloads_st + hd.payload_off, 
 			MIN(len, hd.payload_len));
 	return 0;
 
@@ -393,15 +395,16 @@ static int ringbuf_open(struct inode * inode, struct file * filp)
 		printk(KERN_INFO "minor number is %d\n", RINGBUF_DEVICE_MINOR_NR);
 		return -ENODEV;
 	}
-	filp->private_data = (void*) ringbuf_dev;
+	filp->private_data = (void*)(&ringbuf_dev);
 	ringbuf_dev.minor = RINGBUF_DEVICE_MINOR_NR;
 
 	printk(KERN_INFO "Check if the ring buffer is already init");
 	if(kfifo_esize(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
 		
 		printk(KERN_INFO "Start to init the ring buffer\n");
-		kfifo_alloc(ringbuf_dev, RINGBUF_SZ, GFP_KERNEL);
-
+		if(kfifo_alloc(ringbuf_dev.fifo_addr, RINGBUF_SZ, GFP_KERNEL) != 0) {
+			printk(KERN_INFO "kfifo alloc error!");
+		}
 	}
 
 	printk(KERN_INFO "Check if the payloads area is already init");
@@ -415,7 +418,7 @@ static int ringbuf_open(struct inode * inode, struct file * filp)
 
 static int ringbuf_release(struct inode * inode, struct file * filp)
 {
-	if(ringbuf_dev.kfifo_addr != NULL) {
+	if(ringbuf_dev.fifo_addr != NULL) {
 		//TODO: free the payloads linklist
 		payload_pt = 0;
 		printk(KERN_INFO "ring buffer is being freed");
@@ -468,15 +471,15 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
     printk(KERN_INFO "BAR2: 0x%0x, %d\n", dev->bar2_addr,
             dev->bar2_size);
 
-    dev->regs_addr = ioremap(dev->bar0_addr, dev->bar0_len);
+    dev->regs_addr = ioremap(dev->bar0_addr, dev->bar0_size);
     if (!dev->regs_addr) {
-        printk(KERN_INFO "unable to ioremap bar0, sz: %d\n", dev->bar0_len);
+        printk(KERN_INFO "unable to ioremap bar0, sz: %d\n", dev->bar0_size);
         goto release_regions;
     }
 
-    dev->base_addr = ioremap(dev->bar2_addr, dev->bar2_len);
+    dev->base_addr = ioremap(dev->bar2_addr, dev->bar2_size);
     if (!dev->base_addr) {
-        printk(KERN_INFO "unable to ioremap bar2, sz: %d\n", dev->bar2_len);
+        printk(KERN_INFO "unable to ioremap bar2, sz: %d\n", dev->bar2_size);
         goto iounmap_bar0;
     }
     printk(KERN_INFO "BAR2 map: %p\n", dev->base_addr);
@@ -506,8 +509,6 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 
 destroy_device:
     dev->dev = NULL;
-
-iounmap_bar2:
     iounmap(dev->base_addr);
 
 iounmap_bar0:
@@ -527,7 +528,7 @@ out:
 
 static void ringbuf_remove_device(struct pci_dev* pdev)
 {
-    struct ringbuf_devide *dev = &ringbuf_dev;
+    struct ringbuf_device *dev = &ringbuf_dev;
 
     printk(KERN_INFO "removing ivshmem device\n");
 
