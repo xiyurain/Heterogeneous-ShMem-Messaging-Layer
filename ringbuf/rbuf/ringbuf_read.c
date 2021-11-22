@@ -31,7 +31,7 @@ MODULE_AUTHOR("Xiangyu Ren <180110718@mail.hit.edu.cn>");
 MODULE_DESCRIPTION("ring buffer based on Inter-VM shared memory module");
 MODULE_VERSION("1.0");
 
-#define RINGBUF_SZ 4096
+#define RINGBUF_SZ 1024
 #define RINGBUF_MSG_SZ sizeof(rbmsg_hd)
 #define BUF_INFO_SZ sizeof(ringbuf_info)
 #define TRUE 1
@@ -110,7 +110,7 @@ typedef struct ringbuf_device
 
 	kfifo* 				fifo_addr;
 	unsigned int 		bufsize;
-	void* 				payloads_st;
+	void __iomem		*payloads_st;
 	
 	unsigned int 		role;
 } ringbuf_device;
@@ -286,7 +286,18 @@ static void free_msix_vectors(struct ringbuf_device *dev)
     kfree(dev->msix_names);
 }
 
+static void ringbuf_fifo_init(void) {
+	printk(KERN_INFO "Check if the ring buffer is already init");
+	if(kfifo_size(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
+		printk(KERN_INFO "Start to init the ring buffer\n");
+		DEFINE_KFIFO(fifo, char, RINGBUF_SZ);
+		memcpy(ringbuf_dev.fifo_addr, &fifo, sizeof(fifo));
+	}
 
+	printk(KERN_INFO "Check if the payloads area is already init");
+	//TODO: init the payloads linklist
+	payload_pt = 0;
+}
 
 static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_t *offset)
 {
@@ -307,16 +318,19 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_
 		return 0;
 	}
 
+	printk("----------%u-----------\n", kfifo_len(ringbuf_dev.fifo_addr));
 	msgread_len = kfifo_out(ringbuf_dev.fifo_addr, &hd, RINGBUF_MSG_SZ);
 	if(hd.src_qid != QEMU_PROCESS_ID) {
 		printk(KERN_ERR "invalid ring buffer msg\n");
 		goto err;
 	}
+	printk("----------%u-----------\n", msgread_len);
 
 	rmb();
 
 	memcpy(buffer, ringbuf_dev.payloads_st + hd.payload_off, 
 			MIN(len, hd.payload_len));
+	// memcpy(buffer, ringbuf_dev.payloads_st, 10);
 	return 0;
 
 err:
@@ -377,19 +391,6 @@ static int ringbuf_open(struct inode * inode, struct file * filp)
 	}
 	filp->private_data = (void*)(&ringbuf_dev);
 	ringbuf_dev.minor = RINGBUF_DEVICE_MINOR_NR;
-
-	printk(KERN_INFO "Check if the ring buffer is already init");
-	if(kfifo_esize(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
-		
-		printk(KERN_INFO "Start to init the ring buffer\n");
-		if(kfifo_alloc(ringbuf_dev.fifo_addr, RINGBUF_SZ, GFP_KERNEL) != 0) {
-			printk(KERN_INFO "kfifo alloc error!");
-		}
-	}
-
-	printk(KERN_INFO "Check if the payloads area is already init");
-	//TODO: init the payloads linklist
-	payload_pt = 0;
 
    return 0;
 }
@@ -463,12 +464,13 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
         printk(KERN_INFO "unable to ioremap bar2, sz: %d\n", dev->bar2_size);
         goto iounmap_bar0;
     }
-    printk(KERN_INFO "BAR2 map: %p\n", dev->base_addr);
+    printk(KERN_INFO "BAR2 map: %lx\n", dev->base_addr);
 
 	ringbuf_dev.fifo_addr = (kfifo*)ringbuf_dev.base_addr;
-	ringbuf_dev.payloads_st = ringbuf_dev.base_addr + sizeof(kfifo);	
+	ringbuf_dev.payloads_st = ringbuf_dev.base_addr + sizeof(kfifo) + RINGBUF_SZ;	
 
     dev->dev = pdev;
+	dev->role = RINGBUF_DEV_ROLE;
 
     if (dev->revision == 1) {
         /* Only process the MSI-X interrupt. */
@@ -487,7 +489,12 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
     }
 
     printk(KERN_INFO "device probed\n");
-    ringbuf_ioctl(IOCTL_WAIT, 0);
+	ringbuf_fifo_init();
+
+	char buf[20];
+	ringbuf_read(NULL, buf, 10, 0);
+	printk(KERN_INFO "get msg: %s", buf);
+    // ringbuf_ioctl(IOCTL_WAIT, 0);
     return 0;
 
 destroy_device:
