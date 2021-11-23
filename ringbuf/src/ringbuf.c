@@ -41,12 +41,12 @@ MODULE_VERSION("1.0");
 #define QEMU_PROCESS_ID 1
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
-#define IOCTL_MAGIC				('f')
-#define IOCTL_RING				_IOW(IOCTL_MAGIC, 1, u32)
-#define IOCTL_WAIT				_IO(IOCTL_MAGIC, 2)
-#define IOCTL_IVPOSITION		_IOR(IOCTL_MAGIC, 3, u32)
-#define IVPOSITION_REG_OFF		0x08
-#define DOORBELL_REG_OFF		0x0c
+#define IOCTL_MAGIC		('f')
+#define IOCTL_RING		_IOW(IOCTL_MAGIC, 1, u32)
+#define IOCTL_WAIT		_IO(IOCTL_MAGIC, 2)
+#define IOCTL_IVPOSITION	_IOR(IOCTL_MAGIC, 3, u32)
+#define IVPOSITION_REG_OFF	0x08
+#define DOORBELL_REG_OFF	0x0c
 
 /* KVM Inter-VM shared memory device register offsets */
 enum {
@@ -65,8 +65,7 @@ enum {
 /*
  * message sent via ring buffer, as header of the payloads
 */
-typedef struct ringbuf_msg_hd
-{
+typedef struct ringbuf_msg_hd {
 	unsigned int src_qid;
 
 	unsigned int payload_off;
@@ -74,7 +73,6 @@ typedef struct ringbuf_msg_hd
 } rbmsg_hd;
 
 typedef STRUCT_KFIFO(char, RINGBUF_SZ) fifo;
-/*--------------------------------------- ringbuf device and its file operations */
 
 /*
  * @base_addr: mapped start address of IVshmem space
@@ -122,7 +120,8 @@ static ssize_t ringbuf_write(struct file *, const char *, size_t, loff_t *);
 static void ringbuf_remove_device(struct pci_dev* pdev);
 static int ringbuf_probe_device(struct pci_dev *pdev,
 				const struct pci_device_id * ent);
-// static long ringbuf_ioctl(struct file *filp, unsigned int cmd, unsigned int value)
+// static long ringbuf_ioctl(struct file *filp, unsigned int cmd, 
+				unsigned int value)
 
 static int event_toggle;
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
@@ -176,7 +175,8 @@ static long ringbuf_ioctl(unsigned int cmd, unsigned int value)
 
 	case IOCTL_WAIT:
 		printk(KERN_INFO "wait for interrupt\n");
-		ret = wait_event_interruptible(wait_queue, (event_toggle == 1));
+		ret = wait_event_interruptible(wait_queue, 
+					(event_toggle == 1));
 		if (ret == 0) {
 			printk(KERN_INFO "wakeup\n");
 			event_toggle = 0;
@@ -220,8 +220,6 @@ static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 
 	return IRQ_HANDLED;
 }
-
-
 
 static int request_msix_vectors(struct ringbuf_device *dev, int n)
 {
@@ -274,14 +272,16 @@ error:
     	return ret;
 }
 
-static void ringbuf_fifo_init(void) {
+static void ringbuf_fifo_init(void) 
+{
 	fifo fifo_indevice;
 
 	printk(KERN_INFO "Check if the ring buffer is already init");
 	if(kfifo_size(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
 		printk(KERN_INFO "Start to init the ring buffer\n");
 
-		memcpy(ringbuf_dev.fifo_addr, &fifo_indevice, sizeof(fifo_indevice));
+		memcpy(ringbuf_dev.fifo_addr, &fifo_indevice, 
+					sizeof(fifo_indevice));
 		INIT_KFIFO(*(ringbuf_dev.fifo_addr));
 	}
 	printk("address of fifo_indevice: %lx\ndata pointer of fifo_indevice: %lx\nsizeof: %d\n",
@@ -302,7 +302,8 @@ static void free_msix_vectors(struct ringbuf_device *dev)
 
 
 
-static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_t *offset)
+static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, 
+							loff_t *offset)
 {
 	rbmsg_hd hd;
 	unsigned int msgread_len;
@@ -329,7 +330,8 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, loff_
 
 	mb();
 
-	msgread_len = kfifo_out(ringbuf_dev.fifo_addr, (char*)&hd, RINGBUF_MSG_SZ);
+	msgread_len = kfifo_out(ringbuf_dev.fifo_addr, (char*)&hd, 
+						RINGBUF_MSG_SZ);
 	if(hd.src_qid != QEMU_PROCESS_ID) {
 		printk(KERN_ERR "invalid ring buffer msg\n");
 		goto err;
@@ -347,7 +349,8 @@ err:
 
 
 
-static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len, loff_t *offset)
+static ssize_t ringbuf_write(struct file * filp, const char * buffer, 
+					size_t len, loff_t *offset)
 {
 	rbmsg_hd hd;
 	unsigned int msgsent_len;
@@ -379,7 +382,8 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer, size_t len
 
 	mb();
 
-	msgsent_len = kfifo_in(ringbuf_dev.fifo_addr, (char*)&hd, RINGBUF_MSG_SZ);
+	msgsent_len = kfifo_in(ringbuf_dev.fifo_addr, (char*)&hd, 
+						RINGBUF_MSG_SZ);
 	if(msgsent_len != RINGBUF_MSG_SZ) {
 		printk(KERN_ERR "ring buffer msg incomplete! only %d sent\n", msgsent_len);
 		goto err;
@@ -400,7 +404,8 @@ static int ringbuf_open(struct inode * inode, struct file * filp)
 	printk(KERN_INFO "Opening ringbuf device\n");
 
 	if (MINOR(inode->i_rdev) != RINGBUF_DEVICE_MINOR_NR) {
-		printk(KERN_INFO "minor number is %d\n", RINGBUF_DEVICE_MINOR_NR);
+		printk(KERN_INFO "minor number is %d\n", 
+				RINGBUF_DEVICE_MINOR_NR);
 		return -ENODEV;
 	}
 	filp->private_data = (void*)(&ringbuf_dev);
@@ -469,27 +474,32 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 
 	dev->regs_addr = ioremap(dev->bar0_addr, dev->bar0_size);
 	if (!dev->regs_addr) {
-		printk(KERN_INFO "unable to ioremap bar0, sz: %d\n", dev->bar0_size);
+		printk(KERN_INFO "unable to ioremap bar0, sz: %d\n", 
+						dev->bar0_size);
 		goto release_regions;
 	}
 
 	dev->base_addr = ioremap(dev->bar2_addr, dev->bar2_size);
 	if (!dev->base_addr) {
-		printk(KERN_INFO "unable to ioremap bar2, sz: %d\n", dev->bar2_size);
+		printk(KERN_INFO "unable to ioremap bar2, sz: %d\n", 
+						dev->bar2_size);
 		goto iounmap_bar0;
 	}
 	printk(KERN_INFO "BAR2 map: %p\n", dev->base_addr);
 
 	ringbuf_dev.fifo_addr = (fifo*)ringbuf_dev.base_addr;
-	ringbuf_dev.payloads_st = ringbuf_dev.base_addr + sizeof(fifo) + RINGBUF_SZ;	
+	ringbuf_dev.payloads_st = ringbuf_dev.base_addr 
+					+ sizeof(fifo) + RINGBUF_SZ;	
 
 	dev->dev = pdev;
 	dev->role = RINGBUF_DEV_ROLE;
 
 	if (dev->revision == 1) {
-		dev->ivposition = ioread32(dev->regs_addr + IVPOSITION_REG_OFF);
+		dev->ivposition = ioread32(
+			dev->regs_addr + IVPOSITION_REG_OFF);
 
-		printk(KERN_INFO "device ivposition: %u, MSI-X: %s\n", dev->ivposition,
+		printk(KERN_INFO "device ivposition: %u, MSI-X: %s\n", 
+			dev->ivposition,
 			(dev->ivposition == 0) ? "no": "yes");
 
 		if (dev->ivposition != 0) {
@@ -553,7 +563,6 @@ static int __init ringbuf_init (void)
 {
     	int err = -ENOMEM;
 
-	/* Register device node ops. */
 	err = register_chrdev(0, "ringbuf", &ringbuf_ops);
 	if (err < 0) {
 		printk(KERN_ERR "Unable to register ringbuf device\n");
