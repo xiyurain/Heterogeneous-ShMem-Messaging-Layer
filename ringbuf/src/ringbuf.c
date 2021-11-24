@@ -37,7 +37,6 @@ MODULE_VERSION("1.0");
 #define TRUE 1
 #define FALSE 0
 #define RINGBUF_DEVICE_MINOR_NR 0
-#define RINGBUF_DEV_ROLE Consumer
 #define QEMU_PROCESS_ID 1
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
@@ -47,6 +46,10 @@ MODULE_VERSION("1.0");
 #define IOCTL_IVPOSITION	_IOR(IOCTL_MAGIC, 3, u32)
 #define IVPOSITION_REG_OFF	0x08
 #define DOORBELL_REG_OFF	0x0c
+
+static int RINGBUF_DEV_ROLE = 1;
+MODULE_PARM_DESC(RINGBUF_DEV_ROLE, "Role of this ringbuf device.");
+module_param(RINGBUF_DEV_ROLE, int, 0400);
 
 /* KVM Inter-VM shared memory device register offsets */
 enum {
@@ -121,7 +124,7 @@ static void ringbuf_remove_device(struct pci_dev* pdev);
 static int ringbuf_probe_device(struct pci_dev *pdev,
 				const struct pci_device_id * ent);
 // static long ringbuf_ioctl(struct file *filp, unsigned int cmd, 
-				unsigned int value)
+				// unsigned int value)
 
 static int event_toggle;
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
@@ -314,11 +317,11 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len,
 		printk(KERN_ERR "ringbuf: not allowed to read \n");
 		return 0;
 	}
-	if(!ringbuf_dev.base_addr || !ringbuf_dev.fifo_addr) {
+	if(!ringbuf_dev.base_addr || !fifo_addr) {
 		printk(KERN_ERR "ringbuf: cannot read from addr (NULL)\n");
 		return 0;
 	}
-	if(kfifo_len(ringbuf_dev.fifo_addr) < RINGBUF_MSG_SZ) {
+	if(kfifo_len(fifo_addr) < RINGBUF_MSG_SZ) {
 		printk(KERN_ERR "no msg in ring buffer\n");
 		return 0;
 	}
@@ -330,8 +333,7 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len,
 
 	mb();
 
-	msgread_len = kfifo_out(ringbuf_dev.fifo_addr, (char*)&hd, 
-						RINGBUF_MSG_SZ);
+	msgread_len = kfifo_out(fifo_addr, (char*)&hd, RINGBUF_MSG_SZ);
 	if(hd.src_qid != QEMU_PROCESS_ID) {
 		printk(KERN_ERR "invalid ring buffer msg\n");
 		goto err;
@@ -354,16 +356,17 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 {
 	rbmsg_hd hd;
 	unsigned int msgsent_len;
+	fifo* fifo_addr = ringbuf_dev.fifo_addr;
 
 	if(ringbuf_dev.role != Producer) {
 		printk(KERN_ERR "ringbuf: not allowed to write \n");
 		return 0;
 	}
-	if(!ringbuf_dev.base_addr || !ringbuf_dev.fifo_addr) {
+	if(!ringbuf_dev.base_addr || !fifo_addr) {
 		printk(KERN_ERR "ringbuf: cannot read from addr (NULL)\n");
 		return 0;
 	}
-	if(kfifo_avail(ringbuf_dev.fifo_addr) < RINGBUF_MSG_SZ) {
+	if(kfifo_avail(fifo_addr) < RINGBUF_MSG_SZ) {
 		printk(KERN_ERR "not enough space in ring buffer\n");
 		return 0;
 	}
@@ -382,8 +385,7 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 
 	mb();
 
-	msgsent_len = kfifo_in(ringbuf_dev.fifo_addr, (char*)&hd, 
-						RINGBUF_MSG_SZ);
+	msgsent_len = kfifo_in(fifo_addr, (char*)&hd, RINGBUF_MSG_SZ);
 	if(msgsent_len != RINGBUF_MSG_SZ) {
 		printk(KERN_ERR "ring buffer msg incomplete! only %d sent\n", msgsent_len);
 		goto err;
