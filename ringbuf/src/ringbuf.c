@@ -25,6 +25,7 @@
 #include <linux/ioctl.h>
 #include <linux/sched.h>
 #include <linux/wait.h>
+#include<linux/delay.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Xiangyu Ren <180110718@mail.hit.edu.cn>");
@@ -93,6 +94,7 @@ typedef struct ringbuf_device {
 	unsigned int 	ivposition;
 
 	void __iomem 	*regs_addr;
+	void __iomem	*vec_tb;
 	void __iomem 	*base_addr;
 
 	unsigned int 	bar0_addr;
@@ -208,10 +210,6 @@ static long ringbuf_ioctl(unsigned int cmd, unsigned int value)
 static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 {
 	struct ringbuf_device * dev = dev_instance;
-
-	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
-	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
-	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
 
 	if (unlikely(dev == NULL))
 		return IRQ_NONE;
@@ -432,7 +430,36 @@ static int ringbuf_release(struct inode * inode, struct file * filp)
    	return 0;
 }
 
+static void print_vec_tb(void) {
+	unsigned int *pt = (unsigned int *)ringbuf_dev.vec_tb;
+	unsigned int *writeto;
+	unsigned long * pending = (unsigned long *)ringbuf_dev.vec_tb + 0x800;
+	int i;
+	void __iomem * nowhere;
 
+	nowhere = ioremap(0xfee01004, 16);
+	if (!nowhere) 
+		printk(KERN_INFO "unable to ioremap nowhere\n");
+	writeto = (unsigned int *)nowhere;
+
+	for(i = 0; i < 4; i++) {
+		printk(KERN_INFO "Msg Addr: %x\n", *pt);
+		printk(KERN_INFO "Upper: %x\n", *(pt+1));
+		printk(KERN_INFO "Data: %x\n", *(pt+2));
+		printk(KERN_INFO "Control: %x\n", *(pt+3));
+		pt += 4;
+	}
+
+	printk(KERN_INFO "pending table: %x\n", *pending);
+
+	printk(KERN_INFO "msi-x write: %x", *writeto);
+	*writeto = 0x29;
+	printk(KERN_INFO "msi-x write: %x", *writeto);
+	// while(!*writeto) {
+	// 	printk(KERN_INFO "msi-x write: %x", *writeto);
+	// }
+	
+}
 
 static int ringbuf_probe_device (struct pci_dev *pdev,
 				const struct pci_device_id * ent) 
@@ -481,12 +508,20 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 		goto release_regions;
 	}
 
+	dev->vec_tb = ioremap(dev->bar1_addr, dev->bar1_size);
+	if (!dev->vec_tb) {
+		printk(KERN_INFO "unable to ioremap bar1, sz: %d\n", 
+						dev->bar1_size);
+		goto release_regions;
+	}
+
 	dev->base_addr = ioremap(dev->bar2_addr, dev->bar2_size);
 	if (!dev->base_addr) {
 		printk(KERN_INFO "unable to ioremap bar2, sz: %d\n", 
 						dev->bar2_size);
 		goto iounmap_bar0;
 	}
+	printk(KERN_INFO "BAR1 map: %p\n", dev->base_addr);
 	printk(KERN_INFO "BAR2 map: %p\n", dev->base_addr);
 
 	ringbuf_dev.fifo_addr = (fifo*)ringbuf_dev.base_addr;
@@ -505,7 +540,7 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 			(dev->ivposition == 0) ? "no": "yes");
 
 		if (dev->ivposition != 0) {
-			ret = request_msix_vectors(dev, 8);
+			ret = request_msix_vectors(dev, 4);
 			if (ret != 0) {
 				goto destroy_device;
 			}
@@ -515,6 +550,7 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 
 	ringbuf_fifo_init();
 
+	print_vec_tb();
 	return 0;
 
 destroy_device:
@@ -561,7 +597,7 @@ static void __exit ringbuf_cleanup(void)
 	unregister_chrdev(device_major_nr, "ringbuf");
 }
 
-static int __init ringbuf_init (void)
+static int __init ringbuf_init(void)
 {
     	int err = -ENOMEM;
 
