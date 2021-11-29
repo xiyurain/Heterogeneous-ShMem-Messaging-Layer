@@ -239,7 +239,7 @@ static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
 
 	ringbuf_read(NULL, recv, 512, 0);
-	printk(KERN_INFO "msg arrived: %s\n\r", recv);
+	printk(KERN_INFO "msg arrived: %s\n", recv);
 
 	return IRQ_HANDLED;
 }
@@ -347,9 +347,9 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len,
 		return 0;
 	}
 
-	// printk("relocating the kfifo.data: %lx => %lx\n",
-	// 		fifo_addr->kfifo.data,
-	// 		(void*)fifo_addr + 0x18);
+	printk("relocating the kfifo.data: %lx => %lx\n",
+			fifo_addr->kfifo.data,
+			(void*)fifo_addr + 0x18);
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 
 	mb();
@@ -399,9 +399,9 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 
 	wmb();
 
-	// printk("relocating the kfifo.data: %lx => %lx\n",
-	// 		fifo_addr->kfifo.data,
-	// 		(void*)fifo_addr + 0x18);
+	printk("relocating the kfifo.data: %lx => %lx\n",
+			fifo_addr->kfifo.data,
+			(void*)fifo_addr + 0x18);
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 
 	mb();
@@ -565,7 +565,7 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	// print_vec_tb();
 	if(dev->role == Producer) {
 		ringbuf_write(NULL, "Connection established.", 24, 0);
-		// msleep(1000);
+		// msleep(10000);
 		// ringbuf_write(NULL, "asfdsfsfsdfwefwfjlsdfosmfoosmfklsfnfldkfioenfleifnslefnoikldsfnoenfk", 69, 0);
 		// msleep(10000);
 		// ringbuf_write(NULL, "This is a test message.", 24, 0);
