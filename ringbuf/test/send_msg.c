@@ -1,30 +1,38 @@
+#include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/fs.h>
-#include <linux/uaccess.h>
+#include <linux/string.h>
+#include <linux/mm.h>
+#include <linux/syscalls.h>
+#include <asm/unistd.h>
+#include <asm/uaccess.h>
  
-int __init wtest_init(void)
+int __init sendmsg_init(void)
 {
-    // struct file *fp;
-    printk("hello enter/n");
+        struct file *fp = NULL;
+        loff_t pos = 0;
+        printk("send_message test case start.\n");
 
-    // fp = filp_open("/dev/ringbuf", O_RDWR, 0644);
-    // if (IS_ERR(fp)){
-    //     printk("create file error/n");
-    //     return -1;
-    // }
-
-    // filp_close(fp,NULL);
-
-    // gic_raise_softirq(cpumask_of(0),24);
-    return 0;
+        fp = filp_open("/dev/ringbuf", O_RDWR, 0644);
+        if (IS_ERR(fp)) {
+                printk("error occured while opening ring buffer, exiting...\n");
+                return 0;
+        }
+        
+        kernel_write(fp, "Xiangyu Ren - 180110718@stu.hit.edu.cn", 37, &pos);
+        
+        filp_close(fp, NULL);  
+        fp = NULL;
+        return 0;
 }
-void __exit wtest_exit(void)
+
+void __exit sendmsg_exit(void)
 {
-    printk("wtest exit/n");
+    printk("send_message test case exit/n");
 }
  
-module_init(wtest_init);
-module_exit(wtest_exit);
+module_init(sendmsg_init);
+module_exit(sendmsg_exit);
  
 MODULE_LICENSE("GPL");

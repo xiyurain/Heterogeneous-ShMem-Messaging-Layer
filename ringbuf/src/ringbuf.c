@@ -565,7 +565,7 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	// print_vec_tb();
 	if(dev->role == Producer) {
 		ringbuf_write(NULL, "Connection established.", 24, 0);
-		msleep(1000);
+		// msleep(1000);
 		// ringbuf_write(NULL, "asfdsfsfsdfwefwfjlsdfosmfoosmfklsfnfldkfioenfleifnslefnoikldsfnoenfk", 69, 0);
 		// msleep(10000);
 		// ringbuf_write(NULL, "This is a test message.", 24, 0);
