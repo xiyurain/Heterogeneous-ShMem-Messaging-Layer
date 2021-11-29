@@ -25,7 +25,8 @@
 #include <linux/ioctl.h>
 #include <linux/sched.h>
 #include <linux/wait.h>
-#include<linux/delay.h>
+#include <linux/delay.h>
+#include <linux/workqueue.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Xiangyu Ren <180110718@mail.hit.edu.cn>");
@@ -134,6 +135,9 @@ static void ringbuf_notify(unsigned int value);
 static int event_toggle;
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
 DECLARE_WAIT_QUEUE_HEAD(wait_queue_poll);
+struct workqueue_struct *poll_workqueue;
+struct work_struct poll_work;
+
 
 static ringbuf_device ringbuf_dev;
 static unsigned int payload_pt;
@@ -166,7 +170,6 @@ static struct pci_driver ringbuf_pci_driver = {
 
 static long ringbuf_ioctl(unsigned int cmd, unsigned int value)
 {
-    	int ret;
     	unsigned int ivposition;
     	unsigned int vector;
 
@@ -203,41 +206,40 @@ static long ringbuf_ioctl(unsigned int cmd, unsigned int value)
 static void ringbuf_poll(unsigned int value) {
 	void __iomem * nowhere;
 	unsigned int *writeto;
-	unsigned int *ret = ringbuf_dev.notify_addr;
-
-	printk(KERN_INFO "polling for message...\n");
-	*ret = 0;
-	while(TRUE) {
-		if(*ret == value)
-			break;
-		// printk(KERN_INFO "polling for notify msg: %u", *ret);
-		msleep(SLEEP_PERIOD_MSEC);
-	}
+	unsigned int ret;
 
 	nowhere = ioremap(0xfee01004, 16);
 	if (!nowhere) 
 		printk(KERN_INFO "unable to ioremap nowhere\n");
 	writeto = (unsigned int *)nowhere;
-	*writeto = 0x29;
+
+	printk(KERN_INFO "polling for message...\n");
+	while(TRUE) {
+		if(ret != *ringbuf_dev.notify_addr) {
+			*writeto = 0x29;
+			ret = *ringbuf_dev.notify_addr;
+		}
+		msleep(SLEEP_PERIOD_MSEC);
+	}
 }
 
 static void ringbuf_notify(unsigned int value) {
-	*ringbuf_dev.notify_addr = value;
-	msleep(SLEEP_PERIOD_MSEC);
-	*ringbuf_dev.notify_addr = value;
+	*ringbuf_dev.notify_addr = 
+		(*ringbuf_dev.notify_addr) ? 0x00: 0x01;
 }
 
 static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 {
 	struct ringbuf_device * dev = dev_instance;
+	char recv[512];
 
 	if (unlikely(dev == NULL))
 		return IRQ_NONE;
 
 	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
 
-	event_toggle = 1;
-	wake_up_interruptible(&wait_queue);
+	ringbuf_read(NULL, recv, 512, 0);
+	printk(KERN_INFO "msg arrived: %s\n", recv);
 
 	return IRQ_HANDLED;
 }
@@ -296,6 +298,10 @@ error:
 static void ringbuf_fifo_init(void) 
 {
 	fifo fifo_indevice;
+
+	poll_workqueue = alloc_workqueue("poll_workqueue", 0, 0);
+	INIT_WORK(&poll_work, ringbuf_poll);
+	queue_work(poll_workqueue, &poll_work);
 
 	printk(KERN_INFO "Check if the ring buffer is already init");
 	if(kfifo_size(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
@@ -475,7 +481,6 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 {
 
 	int ret;
-	char recv[512];
 	struct ringbuf_device *dev = &ringbuf_dev;
 	printk(KERN_INFO "probing for device\n");
 
@@ -562,30 +567,15 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 
 	ringbuf_fifo_init();
 
-	print_vec_tb();
+	// print_vec_tb();
 	if(dev->role == Producer) {
-		ringbuf_ioctl(IOCTL_RING, 1);
-		ringbuf_ioctl(IOCTL_WAIT, 2);
-		printk(KERN_INFO "connection established.\n");
-		msleep(5000);
-		ringbuf_write(NULL, "This is a test message.", 24, 0);
+		ringbuf_write(NULL, "Connection established.", 24, 0);
 		msleep(10000);
 		ringbuf_write(NULL, "asfdsfsfsdfwefwfjlsdfosmfoosmfklsfnfldkfioenfleifnslefnoikldsfnoenfk", 69, 0);
 		msleep(10000);
 		ringbuf_write(NULL, "This is a test message.", 24, 0);
 	} else { 
-		ringbuf_ioctl(IOCTL_WAIT, 1);
-		printk(KERN_INFO "connection established.\n");
-		msleep(3*SLEEP_PERIOD_MSEC);
-		ringbuf_ioctl(IOCTL_RING, 2);
-		ringbuf_read(NULL, recv, 512, 0);
-		printk(KERN_INFO "New msg arrived: %s\n", recv);
-		msleep(3000);
-		ringbuf_read(NULL, recv, 512, 0);
-		printk(KERN_INFO "New msg arrived: %s\n", recv);
-		msleep(3000);
-		ringbuf_read(NULL, recv, 512, 0);
-		printk(KERN_INFO "New msg arrived: %s\n", recv);
+		//todo: workqueue
 	}
 	return 0;
 

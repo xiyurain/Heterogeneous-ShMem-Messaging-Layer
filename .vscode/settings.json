@@ -1,0 +1,6 @@
+{
+        "files.associations": {
+                "pci_regs.h": "c"
+        },
+        "C_Cpp.errorSquiggles": "Disabled"
+}
