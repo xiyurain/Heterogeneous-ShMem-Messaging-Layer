@@ -50,9 +50,9 @@ MODULE_VERSION("1.0");
 #define IVPOSITION_REG_OFF	0x08
 #define DOORBELL_REG_OFF	0x0c
 
-static int RINGBUF_DEV_ROLE = 1;
-MODULE_PARM_DESC(RINGBUF_DEV_ROLE, "Role of this ringbuf device.");
-module_param(RINGBUF_DEV_ROLE, int, 0400);
+static int ROLE = 1;
+MODULE_PARM_DESC(ROLE, "Role of this ringbuf device.");
+module_param(ROLE, int, 0400);
 
 /* KVM Inter-VM shared memory device register offsets */
 enum {
@@ -129,14 +129,14 @@ static void ringbuf_remove_device(struct pci_dev* pdev);
 static int ringbuf_probe_device(struct pci_dev *pdev,
 				const struct pci_device_id * ent);
 static long ringbuf_ioctl(unsigned int cmd, unsigned int value);
-static void ringbuf_poll(unsigned int value);
+static void ringbuf_poll(struct work_struct *work);
 static void ringbuf_notify(unsigned int value);
 
 static int event_toggle;
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
 DECLARE_WAIT_QUEUE_HEAD(wait_queue_poll);
 struct workqueue_struct *poll_workqueue;
-struct work_struct poll_work;
+DECLARE_WORK(poll_work, ringbuf_poll);
 
 
 static ringbuf_device ringbuf_dev;
@@ -188,7 +188,7 @@ static long ringbuf_ioctl(unsigned int cmd, unsigned int value)
 
 	case IOCTL_WAIT:
 		printk(KERN_INFO "wait for interrupt\n");
-		ringbuf_poll(value);
+		// todo: poll
 		return 0;
 
 	case IOCTL_IVPOSITION:
@@ -203,17 +203,17 @@ static long ringbuf_ioctl(unsigned int cmd, unsigned int value)
 	return 0;
 }
 
-static void ringbuf_poll(unsigned int value) {
+static void ringbuf_poll(struct work_struct *work) {
 	void __iomem * nowhere;
 	unsigned int *writeto;
-	unsigned int ret;
+	unsigned int ret = 0;
 
 	nowhere = ioremap(0xfee01004, 16);
 	if (!nowhere) 
 		printk(KERN_INFO "unable to ioremap nowhere\n");
 	writeto = (unsigned int *)nowhere;
 
-	printk(KERN_INFO "polling for message...\n");
+	*ringbuf_dev.notify_addr = ret;
 	while(TRUE) {
 		if(ret != *ringbuf_dev.notify_addr) {
 			*writeto = 0x29;
@@ -239,7 +239,7 @@ static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
 
 	ringbuf_read(NULL, recv, 512, 0);
-	printk(KERN_INFO "msg arrived: %s\n", recv);
+	printk(KERN_INFO "msg arrived: %s\n\r", recv);
 
 	return IRQ_HANDLED;
 }
@@ -299,10 +299,6 @@ static void ringbuf_fifo_init(void)
 {
 	fifo fifo_indevice;
 
-	poll_workqueue = alloc_workqueue("poll_workqueue", 0, 0);
-	INIT_WORK(&poll_work, ringbuf_poll);
-	queue_work(poll_workqueue, &poll_work);
-
 	printk(KERN_INFO "Check if the ring buffer is already init");
 	if(kfifo_size(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
 		printk(KERN_INFO "Start to init the ring buffer\n");
@@ -346,15 +342,14 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len,
 		return 0;
 	}
 
-	ringbuf_ioctl(IOCTL_WAIT, 1);
 	if(kfifo_len(fifo_addr) < RINGBUF_MSG_SZ) {
 		printk(KERN_ERR "no msg in ring buffer\n");
 		return 0;
 	}
 
-	printk("relocating the kfifo.data: %lx => %lx\n",
-			fifo_addr->kfifo.data,
-			(void*)fifo_addr + 0x18);
+	// printk("relocating the kfifo.data: %lx => %lx\n",
+	// 		fifo_addr->kfifo.data,
+	// 		(void*)fifo_addr + 0x18);
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 
 	mb();
@@ -404,9 +399,9 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 
 	wmb();
 
-	printk("relocating the kfifo.data: %lx => %lx\n",
-			fifo_addr->kfifo.data,
-			(void*)fifo_addr + 0x18);
+	// printk("relocating the kfifo.data: %lx => %lx\n",
+	// 		fifo_addr->kfifo.data,
+	// 		(void*)fifo_addr + 0x18);
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 
 	mb();
@@ -546,7 +541,7 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 		(unsigned int *)(ringbuf_dev.base_addr + sizeof(fifo) + RINGBUF_SZ - 8);
 
 	dev->dev = pdev;
-	dev->role = RINGBUF_DEV_ROLE;
+	dev->role = ROLE;
 
 	if (dev->revision == 1) {
 		dev->ivposition = ioread32(
@@ -570,12 +565,13 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	// print_vec_tb();
 	if(dev->role == Producer) {
 		ringbuf_write(NULL, "Connection established.", 24, 0);
-		msleep(10000);
-		ringbuf_write(NULL, "asfdsfsfsdfwefwfjlsdfosmfoosmfklsfnfldkfioenfleifnslefnoikldsfnoenfk", 69, 0);
-		msleep(10000);
-		ringbuf_write(NULL, "This is a test message.", 24, 0);
+		msleep(1000);
+		// ringbuf_write(NULL, "asfdsfsfsdfwefwfjlsdfosmfoosmfklsfnfldkfioenfleifnslefnoikldsfnoenfk", 69, 0);
+		// msleep(10000);
+		// ringbuf_write(NULL, "This is a test message.", 24, 0);
 	} else { 
-		//todo: workqueue
+		poll_workqueue = create_workqueue("poll_workqueue");
+		queue_work(poll_workqueue, &poll_work);
 	}
 	return 0;
 
@@ -613,6 +609,8 @@ static void ringbuf_remove_device(struct pci_dev* pdev)
 
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
+
+	destroy_workqueue(poll_workqueue);
 }
 
 
