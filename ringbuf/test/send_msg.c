@@ -7,16 +7,24 @@
 #include <linux/syscalls.h>
 #include <asm/unistd.h>
 #include <asm/uaccess.h>
+#include <linux/delay.h>
  
 int __init sendmsg_init(void)
 {
         struct file *fp = NULL;
         loff_t pos = 0;
-        printk("send_message test case start.\n");
+        int i, cyc = 20;
+        char msg[256];
 
         fp = filp_open("/dev/ringbuf", O_RDWR, 0644);
-        
-        fp->f_op->write(fp, "Xiangyu Ren - 180110718@stu.hit.edu.cn", 39, &pos);
+
+        printk("send_message test case start.\n");
+        for(i = 0; i < cyc; i++) {
+                sprintf(msg, "Message Payload #%d", i);
+                fp->f_op->write(fp, msg, strlen(msg) + 1, &pos);
+                printk(KERN_INFO "message delivered: %s", msg);
+                msleep(1000);
+        }
         
         filp_close(fp, NULL);  
         fp = NULL;

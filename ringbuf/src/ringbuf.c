@@ -180,8 +180,8 @@ static long ringbuf_ioctl(unsigned int cmd, unsigned int value)
     	case IOCTL_RING:
         	vector = value & 0xffff;
         	ivposition = (value & 0xffff0000) >> 16;
-        	printk(KERN_INFO "ring bell: value: %u(0x%x), vector: %u, peer id: %u\n",
-                	value, value, vector, ivposition);
+        	// printk(KERN_INFO "ring bell: value: %u(0x%x), vector: %u, peer id: %u\n",
+                // 	value, value, vector, ivposition);
         	writel(value & 0xffffffff, dev->regs_addr + DOORBELL_REG_OFF);
 		ringbuf_notify(value);
         break;
@@ -347,9 +347,9 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len,
 		return 0;
 	}
 
-	printk("relocating the kfifo.data: %lx => %lx\n",
-			fifo_addr->kfifo.data,
-			(void*)fifo_addr + 0x18);
+	// printk("relocating the kfifo.data: %lx => %lx\n",
+	// 		fifo_addr->kfifo.data,
+	// 		(void*)fifo_addr + 0x18);
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 
 	mb();
@@ -399,9 +399,9 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 
 	wmb();
 
-	printk("relocating the kfifo.data: %lx => %lx\n",
-			fifo_addr->kfifo.data,
-			(void*)fifo_addr + 0x18);
+	// printk("relocating the kfifo.data: %lx => %lx\n",
+	// 		fifo_addr->kfifo.data,
+	// 		(void*)fifo_addr + 0x18);
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 
 	mb();
