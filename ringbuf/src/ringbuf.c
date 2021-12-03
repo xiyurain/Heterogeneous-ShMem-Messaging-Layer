@@ -27,6 +27,8 @@
 #include <linux/wait.h>
 #include <linux/delay.h>
 #include <linux/workqueue.h>
+#include <linux/spinlock_types.h>
+#include <linux/spinlock.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Xiangyu Ren <180110718@mail.hit.edu.cn>");
@@ -114,6 +116,7 @@ typedef struct ringbuf_device {
 	unsigned int 	bufsize;
 	void __iomem	*payloads_st;
 	unsigned int 	*notify_addr;
+	spinlock_t	*write_lock;
 	
 	unsigned int 	role;
 } ringbuf_device;
@@ -182,8 +185,7 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
     	case IOCTL_RING:
         	vector = value & 0xffff;
         	ivposition = (value & 0xffff0000) >> 16;
-        	// printk(KERN_INFO "ring bell: value: %u(0x%x), vector: %u, peer id: %u\n",
-                // 	value, value, vector, ivposition);
+
         	writel(value & 0xffffffff, dev->regs_addr + DOORBELL_REG_OFF);
 		ringbuf_notify(value);
         break;
@@ -208,20 +210,17 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 static void ringbuf_poll(struct work_struct *work) {
 	void __iomem * nowhere;
 	unsigned int *writeto;
-	// unsigned int ret = 0;
 
 	nowhere = ioremap(0xfee01004, 16);
 	if (!nowhere) 
 		printk(KERN_INFO "unable to ioremap nowhere\n");
 	writeto = (unsigned int *)nowhere;
 
-	// *ringbuf_dev.notify_addr = ret;
 	*ringbuf_dev.notify_addr = 0;
 	while(TRUE) {
 		if(*ringbuf_dev.notify_addr > 0) {
 			(*ringbuf_dev.notify_addr)--;
 			*writeto = 0x29;
-			// ret = *ringbuf_dev.notify_addr;
 		}
 		msleep(SLEEP_PERIOD_MSEC);
 	}
@@ -298,6 +297,7 @@ error:
 static void ringbuf_fifo_init(void) 
 {
 	fifo fifo_indevice;
+	spinlock_t lock;
 
 	printk(KERN_INFO "Check if the ring buffer is already init");
 	if(kfifo_size(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
@@ -306,11 +306,10 @@ static void ringbuf_fifo_init(void)
 		memcpy(ringbuf_dev.fifo_addr, &fifo_indevice, 
 					sizeof(fifo_indevice));
 		INIT_KFIFO(*(ringbuf_dev.fifo_addr));
+
+		memcpy(ringbuf_dev.write_lock, &lock, sizeof(lock));
+		spin_lock_init(ringbuf_dev.write_lock);
 	}
-	printk("address of fifo_indevice: %lx\ndata pointer of fifo_indevice: %lx\nsizeof: %d\n",
-			ringbuf_dev.fifo_addr,
-			ringbuf_dev.fifo_addr->kfifo.data,
-			sizeof(fifo_indevice));
 
 	printk(KERN_INFO "Check if the payloads area is already init");
 	//TODO: init the payloads linklist
@@ -328,7 +327,7 @@ static void ringbuf_readmsg(struct tasklet_struct* data)
 	char recv[512];
 
 	ringbuf_read(NULL, recv, 512, 0);
-	printk(KERN_INFO "msg arrived: %s\n", recv);
+	printk(KERN_INFO "recv msg: %s\n", recv);
 }
 
 static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, 
@@ -408,11 +407,14 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 	// printk("relocating the kfifo.data: %lx => %lx\n",
 	// 		fifo_addr->kfifo.data,
 	// 		(void*)fifo_addr + 0x18);
+	spin_lock(ringbuf_dev.write_lock);
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 
 	mb();
 
 	msgsent_len = kfifo_in(fifo_addr, (char*)&hd, RINGBUF_MSG_SZ);
+	spin_unlock(ringbuf_dev.write_lock);
+
 	if(msgsent_len != RINGBUF_MSG_SZ) {
 		printk(KERN_ERR "ring buffer msg incomplete! only %d sent\n", msgsent_len);
 		goto err;
@@ -460,22 +462,22 @@ static int ringbuf_release(struct inode * inode, struct file * filp)
    	return 0;
 }
 
-static void print_vec_tb(void) {
-	unsigned int *pt = (unsigned int *)ringbuf_dev.vec_tb;
-	unsigned long * pending = (unsigned long *)ringbuf_dev.vec_tb + 0x800;
-	int i;
+// static void print_vec_tb(void) {
+// 	unsigned int *pt = (unsigned int *)ringbuf_dev.vec_tb;
+// 	unsigned long * pending = (unsigned long *)ringbuf_dev.vec_tb + 0x800;
+// 	int i;
 
-	for(i = 0; i < 4; i++) {
-		printk(KERN_INFO "Msg Addr: %x\n", *pt);
-		printk(KERN_INFO "Upper: %x\n", *(pt+1));
-		printk(KERN_INFO "Data: %x\n", *(pt+2));
-		printk(KERN_INFO "Control: %x\n", *(pt+3));
-		pt += 4;
-	}
+// 	for(i = 0; i < 4; i++) {
+// 		printk(KERN_INFO "Msg Addr: %x\n", *pt);
+// 		printk(KERN_INFO "Upper: %x\n", *(pt+1));
+// 		printk(KERN_INFO "Data: %x\n", *(pt+2));
+// 		printk(KERN_INFO "Control: %x\n", *(pt+3));
+// 		pt += 4;
+// 	}
 
-	printk(KERN_INFO "pending table: %x\n", *pending);
+// 	printk(KERN_INFO "pending table: %x\n", *pending);
 	
-}
+// }
 
 static int ringbuf_probe_device (struct pci_dev *pdev,
 				const struct pci_device_id * ent) 
@@ -546,6 +548,9 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	ringbuf_dev.notify_addr =
 		(unsigned int *)(ringbuf_dev.base_addr + sizeof(fifo) + RINGBUF_SZ - 8);
 
+	ringbuf_dev.write_lock =
+		(spinlock_t *)(ringbuf_dev.base_addr + sizeof(fifo) + RINGBUF_SZ - 16);
+
 	dev->dev = pdev;
 	dev->role = ROLE;
 
@@ -568,7 +573,6 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 
 	ringbuf_fifo_init();
 
-	// print_vec_tb();
 	if(dev->role == Producer) {
 		ringbuf_write(NULL, "Connection established.", 24, 0);
 	} else { 

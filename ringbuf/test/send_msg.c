@@ -30,10 +30,10 @@ int __init sendmsg_init(void)
 
         printk("send_message test case start.\n");
         for(i = 0; i < cyc; i++) {
-                sprintf(msg, "MSG #%d from peer%ld(jiffies: %lu)", i, ivposition, jiffies);
+                sprintf(msg, "MSG #%d   from peer%ld   (jiffies: %lu)", i, ivposition, jiffies);
                 fp->f_op->write(fp, msg, strlen(msg) + 1, &pos);
-                printk(KERN_INFO "message delivered: %s", msg);
-                msleep(1000);
+                printk(KERN_INFO "msg sent: %s", msg);
+                msleep(3000);
         }
         
         filp_close(fp, NULL);
