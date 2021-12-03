@@ -128,7 +128,7 @@ static ssize_t ringbuf_write(struct file *, const char *, size_t, loff_t *);
 static void ringbuf_remove_device(struct pci_dev* pdev);
 static int ringbuf_probe_device(struct pci_dev *pdev,
 				const struct pci_device_id * ent);
-static long ringbuf_ioctl(unsigned int cmd, unsigned int value);
+static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value);
 static void ringbuf_poll(struct work_struct *work);
 static void ringbuf_notify(unsigned int value);
 static void ringbuf_readmsg(struct tasklet_struct* data);
@@ -152,7 +152,7 @@ static const struct file_operations ringbuf_ops = {
 	.read		= 	ringbuf_read,
 	.write   	= 	ringbuf_write,
 	.release 	= 	ringbuf_release,
-	// .ioctl   	= 	ringbuf_ioctl,
+	.unlocked_ioctl   = 	ringbuf_ioctl,
 };
 
 static struct pci_device_id ringbuf_id_table[] = {
@@ -170,7 +170,7 @@ static struct pci_driver ringbuf_pci_driver = {
 
 
 
-static long ringbuf_ioctl(unsigned int cmd, unsigned int value)
+static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value)
 {
     	unsigned int ivposition;
     	unsigned int vector;
@@ -208,26 +208,27 @@ static long ringbuf_ioctl(unsigned int cmd, unsigned int value)
 static void ringbuf_poll(struct work_struct *work) {
 	void __iomem * nowhere;
 	unsigned int *writeto;
-	unsigned int ret = 0;
+	// unsigned int ret = 0;
 
 	nowhere = ioremap(0xfee01004, 16);
 	if (!nowhere) 
 		printk(KERN_INFO "unable to ioremap nowhere\n");
 	writeto = (unsigned int *)nowhere;
 
-	*ringbuf_dev.notify_addr = ret;
+	// *ringbuf_dev.notify_addr = ret;
+	*ringbuf_dev.notify_addr = 0;
 	while(TRUE) {
-		if(ret != *ringbuf_dev.notify_addr) {
+		if(*ringbuf_dev.notify_addr > 0) {
+			(*ringbuf_dev.notify_addr)--;
 			*writeto = 0x29;
-			ret = *ringbuf_dev.notify_addr;
+			// ret = *ringbuf_dev.notify_addr;
 		}
 		msleep(SLEEP_PERIOD_MSEC);
 	}
 }
 
-static void ringbuf_notify(unsigned int value) {
-	*ringbuf_dev.notify_addr = 
-		(*ringbuf_dev.notify_addr) ? 0x00: 0x01;
+static inline void ringbuf_notify(unsigned int value) {
+	(*ringbuf_dev.notify_addr)++;
 }
 
 static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
@@ -237,7 +238,7 @@ static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 	if (unlikely(dev == NULL))
 		return IRQ_NONE;
 
-	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
+	// printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
 	tasklet_schedule(&read_msg_tasklet);
 
 	return IRQ_HANDLED;
@@ -417,7 +418,7 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 		goto err;
 	}
 
-	ringbuf_ioctl(IOCTL_RING, 1);
+	ringbuf_ioctl(NULL, IOCTL_RING, 1);
 	payload_pt += len;
 	return 0;
 
