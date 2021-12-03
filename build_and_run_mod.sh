@@ -30,3 +30,5 @@ nohup qemu-system-x86_64 -m 1024M \
     -chardev socket,path=/tmp/ivshmem_socket,id=fg-doorbell \
     -device ivshmem-doorbell,chardev=fg-doorbell,vectors=4 \
     > qemu.log2 2>&1 &
+
+ivshmem-client

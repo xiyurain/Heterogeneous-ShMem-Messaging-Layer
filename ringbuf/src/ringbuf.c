@@ -41,7 +41,7 @@ MODULE_VERSION("1.0");
 #define RINGBUF_DEVICE_MINOR_NR 0
 #define QEMU_PROCESS_ID 1
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
-#define SLEEP_PERIOD_MSEC 200
+#define SLEEP_PERIOD_MSEC 10
 
 #define IOCTL_MAGIC		('f')
 #define IOCTL_RING		_IOW(IOCTL_MAGIC, 1, u32)
@@ -131,6 +131,7 @@ static int ringbuf_probe_device(struct pci_dev *pdev,
 static long ringbuf_ioctl(unsigned int cmd, unsigned int value);
 static void ringbuf_poll(struct work_struct *work);
 static void ringbuf_notify(unsigned int value);
+static void ringbuf_readmsg(struct tasklet_struct* data);
 
 static int event_toggle;
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
@@ -138,6 +139,7 @@ DECLARE_WAIT_QUEUE_HEAD(wait_queue_poll);
 struct workqueue_struct *poll_workqueue;
 DECLARE_WORK(poll_work, ringbuf_poll);
 
+DECLARE_TASKLET(read_msg_tasklet, ringbuf_readmsg);
 
 static ringbuf_device ringbuf_dev;
 static unsigned int payload_pt;
@@ -231,15 +233,12 @@ static void ringbuf_notify(unsigned int value) {
 static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 {
 	struct ringbuf_device * dev = dev_instance;
-	char recv[512];
 
 	if (unlikely(dev == NULL))
 		return IRQ_NONE;
 
 	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
-
-	ringbuf_read(NULL, recv, 512, 0);
-	printk(KERN_INFO "msg arrived: %s\n", recv);
+	tasklet_schedule(&read_msg_tasklet);
 
 	return IRQ_HANDLED;
 }
@@ -323,7 +322,13 @@ static void free_msix_vectors(struct ringbuf_device *dev)
 	kfree(dev->msix_names);
 }
 
+static void ringbuf_readmsg(struct tasklet_struct* data)
+{
+	char recv[512];
 
+	ringbuf_read(NULL, recv, 512, 0);
+	printk(KERN_INFO "msg arrived: %s\n", recv);
+}
 
 static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, 
 							loff_t *offset)
@@ -565,10 +570,6 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	// print_vec_tb();
 	if(dev->role == Producer) {
 		ringbuf_write(NULL, "Connection established.", 24, 0);
-		// msleep(10000);
-		// ringbuf_write(NULL, "asfdsfsfsdfwefwfjlsdfosmfoosmfklsfnfldkfioenfleifnslefnoikldsfnoenfk", 69, 0);
-		// msleep(10000);
-		// ringbuf_write(NULL, "This is a test message.", 24, 0);
 	} else { 
 		poll_workqueue = create_workqueue("poll_workqueue");
 		queue_work(poll_workqueue, &poll_work);
