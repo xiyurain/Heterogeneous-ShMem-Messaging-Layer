@@ -80,6 +80,11 @@ typedef struct ringbuf_msg_hd {
 	ssize_t payload_len;
 } rbmsg_hd;
 
+typedef struct payload_pt_node {
+	struct list_head list_node;
+	unsigned int offset;
+} payload_pt_node;
+
 typedef STRUCT_KFIFO(char, RINGBUF_SZ) fifo;
 
 /*
@@ -87,62 +92,75 @@ typedef STRUCT_KFIFO(char, RINGBUF_SZ) fifo;
  * @regaddr: physical address of shmem PCIe dev regs
  * @ioaddr: physical address of IVshmem IO space
  * @fifo_addr: address of the Kfifo struct
- * @payloads_st: start address of the payloads area
+ * @payload_area: start address of the payloads area
 */
 
 typedef struct ringbuf_device {
-	struct pci_dev	*dev;
-	int		minor;
+	struct pci_dev		*dev;
+	int			minor;
 
-	u8 		revision;
-	unsigned int 	ivposition;
+	u8 			revision;
+	unsigned int 		ivposition;
 
-	void __iomem 	*regs_addr;
-	void __iomem	*vec_tb;
-	void __iomem 	*base_addr;
+	void __iomem 		*regs_addr;
+	void __iomem 		*base_addr;
 
-	unsigned int 	bar0_addr;
-	unsigned int 	bar0_size;
-	unsigned int 	bar1_addr;
-	unsigned int 	bar1_size;
+	unsigned int 		bar0_addr;
+	unsigned int 		bar0_size;
+	unsigned int 		bar1_addr;
+	unsigned int 		bar1_size;
 
-	char            (*msix_names)[256];
-	int             nvectors;
+	char            	(*msix_names)[256];
+	int             	nvectors;
 
-	unsigned int 	bar2_addr;
-	unsigned int 	bar2_size;
+	unsigned int 		bar2_addr;
+	unsigned int 		bar2_size;
 
-	fifo*		fifo_addr;
-	unsigned int 	bufsize;
-	void __iomem	*payloads_st;
-	unsigned int 	*notify_addr;
-	spinlock_t	*write_lock;
+	fifo*			fifo_addr;
+	unsigned int 		*notify_in_addr;
+	unsigned int 		*notify_out_addr;
 	
-	unsigned int 	role;
+	unsigned int 		role;
+	void __iomem		*payload_area;
+	struct list_head 	*payload_list;
+	unsigned int 		notify_in_history;
+	unsigned int 		notify_out_history;
+
 } ringbuf_device;
 
 
 static int __init ringbuf_init(void);
 static void __exit ringbuf_cleanup(void);
+
 static int ringbuf_open(struct inode *, struct file *);
 static int ringbuf_release(struct inode *, struct file *);
+
 static ssize_t ringbuf_read(struct file *, char *, size_t, loff_t *);
 static ssize_t ringbuf_write(struct file *, const char *, size_t, loff_t *);
+
+static int request_msix_vectors(struct ringbuf_device *dev, int n);
+static void free_msix_vectors(struct ringbuf_device *dev);
+
 static void ringbuf_remove_device(struct pci_dev* pdev);
 static int ringbuf_probe_device(struct pci_dev *pdev,
 				const struct pci_device_id * ent);
-static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value);
-static void ringbuf_poll(struct work_struct *work);
-static void ringbuf_notify(unsigned int value);
-static void ringbuf_readmsg(struct tasklet_struct* data);
 
-static int event_toggle;
-DECLARE_WAIT_QUEUE_HEAD(wait_queue);
+static long ringbuf_ioctl(struct file *fp, unsigned int cmd, 
+					long unsigned int value);
+static void ringbuf_poll(struct work_struct *work);
+static void ringbuf_notify(void);
+static void ringbuf_unnotify(void);
+
+static void ringbuf_readmsg(struct tasklet_struct* data);
+static void free_payload(struct tasklet_struct* data);
+
+
 DECLARE_WAIT_QUEUE_HEAD(wait_queue_poll);
 struct workqueue_struct *poll_workqueue;
 DECLARE_WORK(poll_work, ringbuf_poll);
 
 DECLARE_TASKLET(read_msg_tasklet, ringbuf_readmsg);
+DECLARE_TASKLET(free_payload_tasklet, free_payload);
 
 static ringbuf_device ringbuf_dev;
 static unsigned int payload_pt;
@@ -175,25 +193,18 @@ static struct pci_driver ringbuf_pci_driver = {
 
 static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value)
 {
-    	unsigned int ivposition;
-    	unsigned int vector;
-
 	ringbuf_device *dev = &ringbuf_dev;
     	BUG_ON(dev->base_addr == NULL);
 
     	switch (cmd) {
     	case IOCTL_RING:
-        	vector = value & 0xffff;
-        	ivposition = (value & 0xffff0000) >> 16;
-
-        	writel(value & 0xffffffff, dev->regs_addr + DOORBELL_REG_OFF);
-		ringbuf_notify(value);
-        break;
+        	// todo: notify
+        	break;
 
 	case IOCTL_WAIT:
 		printk(KERN_INFO "wait for interrupt\n");
 		// todo: poll
-		return 0;
+		break;
 
 	case IOCTL_IVPOSITION:
 		printk(KERN_INFO "get ivposition: %u\n", dev->ivposition);
@@ -208,26 +219,44 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 }
 
 static void ringbuf_poll(struct work_struct *work) {
-	void __iomem * nowhere;
+	void __iomem *int_addr;
 	unsigned int *writeto;
+	ringbuf_device *dev = &ringbuf_dev;
 
-	nowhere = ioremap(0xfee01004, 16);
-	if (!nowhere) 
-		printk(KERN_INFO "unable to ioremap nowhere\n");
-	writeto = (unsigned int *)nowhere;
-
-	*ringbuf_dev.notify_addr = 0;
-	while(TRUE) {
-		if(*ringbuf_dev.notify_addr > 0) {
-			(*ringbuf_dev.notify_addr)--;
-			*writeto = 0x29;
+	int_addr = ioremap(0xfee01004, 16);
+	if (!int_addr) 
+		printk(KERN_INFO "unable to ioremap int_addr\n");
+	writeto = (unsigned int *)int_addr;
+	
+	switch (dev->role) {
+	case Consumer:
+		while(TRUE) {
+			if(*(dev->notify_in_addr) > dev->notify_in_history) {
+				*writeto = 0x28;
+				dev->notify_in_history = *(dev->notify_in_addr);
+			}
+			msleep(SLEEP_PERIOD_MSEC);
 		}
-		msleep(SLEEP_PERIOD_MSEC);
+		break;
+	case Producer:
+		while(TRUE) {
+			if(*(dev->notify_out_addr) > dev->notify_out_history) {
+				*writeto = 0x29;
+				dev->notify_out_history = *(dev->notify_out_addr);
+			}
+			msleep(SLEEP_PERIOD_MSEC);
+		}
+		break;
+	default: break;
 	}
 }
 
-static inline void ringbuf_notify(unsigned int value) {
-	(*ringbuf_dev.notify_addr)++;
+static inline void ringbuf_notify(void) {
+	(*ringbuf_dev.notify_in_addr)++;
+}
+
+static inline void ringbuf_unnotify(void) {
+	(*ringbuf_dev.notify_out_addr)++;
 }
 
 static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
@@ -238,88 +267,46 @@ static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 		return IRQ_NONE;
 
 	// printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
-	tasklet_schedule(&read_msg_tasklet);
-
+	switch (irq)
+	{
+	case 25:
+		tasklet_schedule(&read_msg_tasklet);
+		break;
+	case 26:
+		tasklet_schedule(&free_payload_tasklet);
+		break;
+	default:
+		break;
+	}
+	
 	return IRQ_HANDLED;
-}
-
-static int request_msix_vectors(struct ringbuf_device *dev, int n)
-{
-	int ret, irq_number, alloc_nums;
-	unsigned int i;
-	ret = -EINVAL;
-
-	printk(KERN_INFO "request msi-x vectors: %d\n", n);
-	dev->nvectors = n;
-
-	dev->msix_names = kmalloc(n * sizeof(*dev->msix_names), GFP_KERNEL);
-	if (dev->msix_names == NULL) {
-		ret = -ENOMEM;
-		goto error;
-	}
-
-	alloc_nums = pci_alloc_irq_vectors(dev->dev, 1, n, PCI_IRQ_MSIX);
-	if(alloc_nums < 0) {
-		printk(KERN_INFO "Fail to alloc pci MSI-X irq\n");
-		goto free_names;
-	}
-
-	for (i = 0; i < alloc_nums; i++) {
-		snprintf(dev->msix_names[i], sizeof(*dev->msix_names),
-			"%s%d-%d", "ringbuf", dev->minor, i);
-
-		irq_number = pci_irq_vector(dev->dev, i);
-		ret = request_irq(irq_number, ringbuf_interrupt,
-				IRQF_SHARED, dev->msix_names[i], dev);
-
-		if (ret) {
-			printk(KERN_ERR "unable to alloc irq for msixentry %d vec %d\n",
-							i, irq_number);
-			goto release_irqs;
-		}
-
-		printk(KERN_INFO "irq for msix entry: %d, vector: %d\n",
-			i, irq_number);
-	}
-
-	return 0;
-
-release_irqs:
-    	pci_free_irq_vectors(dev->dev);
-
-free_names:
-    	kfree(dev->msix_names);
-
-error:
-    	return ret;
 }
 
 static void ringbuf_fifo_init(void) 
 {
 	fifo fifo_indevice;
-	spinlock_t lock;
+	ringbuf_device *dev = &ringbuf_dev;
 
-	printk(KERN_INFO "Check if the ring buffer is already init");
-	if(kfifo_size(ringbuf_dev.fifo_addr) != RINGBUF_SZ) {
-		printk(KERN_INFO "Start to init the ring buffer\n");
-
-		memcpy(ringbuf_dev.fifo_addr, &fifo_indevice, 
-					sizeof(fifo_indevice));
-		INIT_KFIFO(*(ringbuf_dev.fifo_addr));
-
-		memcpy(ringbuf_dev.write_lock, &lock, sizeof(lock));
-		spin_lock_init(ringbuf_dev.write_lock);
+	if(dev->role == Producer) {
+		dev->payload_list = kmalloc(sizeof(*(dev->payload_list)), GFP_KERNEL);
+		INIT_LIST_HEAD(dev->payload_list);
+		payload_pt = 0;
 	}
 
-	printk(KERN_INFO "Check if the payloads area is already init");
-	//TODO: init the payloads linklist
-	payload_pt = 0;
-}
+	printk(KERN_INFO "Check if the ring buffer is already init");
+	if(kfifo_size(dev->fifo_addr) != RINGBUF_SZ) {
+		printk(KERN_INFO "Start to init the ring buffer\n");
 
-static void free_msix_vectors(struct ringbuf_device *dev)
-{
-	pci_free_irq_vectors(dev->dev);
-	kfree(dev->msix_names);
+		memcpy(dev->fifo_addr, &fifo_indevice, 
+					sizeof(fifo_indevice));
+		INIT_KFIFO(*(dev->fifo_addr));
+		
+		*(dev->notify_out_addr) = 0;
+		*(dev->notify_in_addr) = 0;
+	}
+	
+	poll_workqueue = create_workqueue("poll_workqueue");
+	queue_work(poll_workqueue, &poll_work);
 }
 
 static void ringbuf_readmsg(struct tasklet_struct* data)
@@ -328,6 +315,20 @@ static void ringbuf_readmsg(struct tasklet_struct* data)
 
 	ringbuf_read(NULL, recv, 512, 0);
 	printk(KERN_INFO "recv msg: %s\n", recv);
+}
+
+static void add_payload(unsigned int payload_pt) 
+{
+	payload_pt_node *new_node;
+	new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+
+	new_node->offset = payload_pt;
+	list_add(&(new_node->list_node), ringbuf_dev.payload_list);
+}
+
+static void free_payload(struct tasklet_struct* data)
+{
+	list_del(ringbuf_dev.payload_list->prev);
 }
 
 static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, 
@@ -352,13 +353,8 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len,
 		return 0;
 	}
 
-	// printk("relocating the kfifo.data: %lx => %lx\n",
-	// 		fifo_addr->kfifo.data,
-	// 		(void*)fifo_addr + 0x18);
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
-
 	mb();
-
 	msgread_len = kfifo_out(fifo_addr, (char*)&hd, RINGBUF_MSG_SZ);
 	if(hd.src_qid != QEMU_PROCESS_ID) {
 		printk(KERN_ERR "invalid ring buffer msg\n");
@@ -367,8 +363,9 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len,
 
 	rmb();
 
-	memcpy(buffer, ringbuf_dev.payloads_st + hd.payload_off, 
+	memcpy(buffer, ringbuf_dev.payload_area + hd.payload_off, 
 			MIN(len, hd.payload_len));
+	ringbuf_unnotify();
 	return 0;
 
 err:
@@ -400,27 +397,18 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 	hd.src_qid = QEMU_PROCESS_ID;
 	hd.payload_off = payload_pt;
 	hd.payload_len = len;
-	memcpy(ringbuf_dev.payloads_st + hd.payload_off, buffer, len);
+	memcpy(ringbuf_dev.payload_area + hd.payload_off, buffer, len);
+	add_payload(payload_pt);
 
-	wmb();
-
-	// printk("relocating the kfifo.data: %lx => %lx\n",
-	// 		fifo_addr->kfifo.data,
-	// 		(void*)fifo_addr + 0x18);
-	spin_lock(ringbuf_dev.write_lock);
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
-
 	mb();
-
 	msgsent_len = kfifo_in(fifo_addr, (char*)&hd, RINGBUF_MSG_SZ);
-	spin_unlock(ringbuf_dev.write_lock);
-
 	if(msgsent_len != RINGBUF_MSG_SZ) {
 		printk(KERN_ERR "ring buffer msg incomplete! only %d sent\n", msgsent_len);
 		goto err;
 	}
 
-	ringbuf_ioctl(NULL, IOCTL_RING, 1);
+	ringbuf_notify();
 	payload_pt += len;
 	return 0;
 
@@ -451,7 +439,7 @@ static int ringbuf_open(struct inode * inode, struct file * filp)
 static int ringbuf_release(struct inode * inode, struct file * filp)
 {
 	if(ringbuf_dev.fifo_addr != NULL) {
-		//TODO: free the payloads linklist
+		//TODO: free the payloads linklist !!!!!!!!!!!!!!!!!!!!!!!
 		payload_pt = 0;
 		printk(KERN_INFO "ring buffer is being freed");
 		kfifo_free(ringbuf_dev.fifo_addr);
@@ -462,27 +450,9 @@ static int ringbuf_release(struct inode * inode, struct file * filp)
    	return 0;
 }
 
-// static void print_vec_tb(void) {
-// 	unsigned int *pt = (unsigned int *)ringbuf_dev.vec_tb;
-// 	unsigned long * pending = (unsigned long *)ringbuf_dev.vec_tb + 0x800;
-// 	int i;
-
-// 	for(i = 0; i < 4; i++) {
-// 		printk(KERN_INFO "Msg Addr: %x\n", *pt);
-// 		printk(KERN_INFO "Upper: %x\n", *(pt+1));
-// 		printk(KERN_INFO "Data: %x\n", *(pt+2));
-// 		printk(KERN_INFO "Control: %x\n", *(pt+3));
-// 		pt += 4;
-// 	}
-
-// 	printk(KERN_INFO "pending table: %x\n", *pending);
-	
-// }
-
 static int ringbuf_probe_device (struct pci_dev *pdev,
 				const struct pci_device_id * ent) 
 {
-
 	int ret;
 	struct ringbuf_device *dev = &ringbuf_dev;
 	printk(KERN_INFO "probing for device\n");
@@ -526,13 +496,6 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 		goto release_regions;
 	}
 
-	dev->vec_tb = ioremap(dev->bar1_addr, dev->bar1_size);
-	if (!dev->vec_tb) {
-		printk(KERN_INFO "unable to ioremap bar1, sz: %d\n", 
-						dev->bar1_size);
-		goto release_regions;
-	}
-
 	dev->base_addr = ioremap(dev->bar2_addr, dev->bar2_size);
 	if (!dev->base_addr) {
 		printk(KERN_INFO "unable to ioremap bar2, sz: %d\n", 
@@ -543,13 +506,12 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	printk(KERN_INFO "BAR2 map: %p\n", dev->base_addr);
 
 	ringbuf_dev.fifo_addr = (fifo*)ringbuf_dev.base_addr;
-	ringbuf_dev.payloads_st = ringbuf_dev.base_addr 
+	ringbuf_dev.payload_area = ringbuf_dev.base_addr 
 					+ sizeof(fifo) + RINGBUF_SZ;	
-	ringbuf_dev.notify_addr =
-		(unsigned int *)(ringbuf_dev.base_addr + sizeof(fifo) + RINGBUF_SZ - 8);
-
-	ringbuf_dev.write_lock =
-		(spinlock_t *)(ringbuf_dev.base_addr + sizeof(fifo) + RINGBUF_SZ - 16);
+	ringbuf_dev.notify_in_addr =
+		(unsigned int *)(ringbuf_dev.base_addr + sizeof(fifo) + RINGBUF_SZ - 16);
+	ringbuf_dev.notify_out_addr =
+		(unsigned int *)(ringbuf_dev.base_addr + sizeof(fifo) + RINGBUF_SZ - 12);
 
 	dev->dev = pdev;
 	dev->role = ROLE;
@@ -569,16 +531,10 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 			}
 		}
 	}
-	printk(KERN_INFO "device probed\n");
 
 	ringbuf_fifo_init();
 
-	if(dev->role == Producer) {
-		ringbuf_write(NULL, "Connection established.", 24, 0);
-	} else { 
-		poll_workqueue = create_workqueue("poll_workqueue");
-		queue_work(poll_workqueue, &poll_work);
-	}
+	printk(KERN_INFO "device probed\n");
 	return 0;
 
 destroy_device:
@@ -597,7 +553,6 @@ disable_device:
 out:
     	return ret;
 }
-
 
 
 static void ringbuf_remove_device(struct pci_dev* pdev)
@@ -653,3 +608,60 @@ error:
 
 module_init(ringbuf_init);
 module_exit(ringbuf_cleanup);
+
+static int request_msix_vectors(struct ringbuf_device *dev, int n)
+{
+	int ret, irq_number, alloc_nums;
+	unsigned int i;
+	ret = -EINVAL;
+
+	printk(KERN_INFO "request msi-x vectors: %d\n", n);
+	dev->nvectors = n;
+
+	dev->msix_names = kmalloc(n * sizeof(*dev->msix_names), GFP_KERNEL);
+	if (dev->msix_names == NULL) {
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	alloc_nums = pci_alloc_irq_vectors(dev->dev, 1, n, PCI_IRQ_MSIX);
+	if(alloc_nums < 0) {
+		printk(KERN_INFO "Fail to alloc pci MSI-X irq\n");
+		goto free_names;
+	}
+
+	for (i = 0; i < alloc_nums; i++) {
+		snprintf(dev->msix_names[i], sizeof(*dev->msix_names),
+			"%s%d-%d", "ringbuf", dev->minor, i);
+
+		irq_number = pci_irq_vector(dev->dev, i);
+		ret = request_irq(irq_number, ringbuf_interrupt,
+				IRQF_SHARED, dev->msix_names[i], dev);
+
+		if (ret) {
+			printk(KERN_ERR "unable to alloc irq for msixentry %d vec %d\n",
+							i, irq_number);
+			goto release_irqs;
+		}
+
+		printk(KERN_INFO "irq for msix entry: %d, vector: %d\n",
+			i, irq_number);
+	}
+
+	return 0;
+
+release_irqs:
+    	pci_free_irq_vectors(dev->dev);
+
+free_names:
+    	kfree(dev->msix_names);
+
+error:
+    	return ret;
+}
+
+static void free_msix_vectors(struct ringbuf_device *dev)
+{
+	pci_free_irq_vectors(dev->dev);
+	kfree(dev->msix_names);
+}

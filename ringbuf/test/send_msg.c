@@ -33,7 +33,7 @@ int __init sendmsg_init(void)
                 sprintf(msg, "MSG #%d   from peer%ld   (jiffies: %lu)", i, ivposition, jiffies);
                 fp->f_op->write(fp, msg, strlen(msg) + 1, &pos);
                 printk(KERN_INFO "msg sent: %s", msg);
-                msleep(3000);
+                msleep(2000);
         }
         
         filp_close(fp, NULL);
