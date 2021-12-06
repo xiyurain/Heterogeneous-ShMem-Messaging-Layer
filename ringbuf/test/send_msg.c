@@ -21,7 +21,7 @@ int __init sendmsg_init(void)
 {
         struct file *fp = NULL;
         loff_t pos = 0;
-        int i, cyc = 20;
+        int i, cyc = 50;
         long ivposition;
         char msg[256];
 
