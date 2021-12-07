@@ -5,7 +5,6 @@
  *
  * Based on kvm_ivshmem.c:
  *         Copyright 2009 Cam Macdonell
- * 
  */
 
 #include <linux/kfifo.h>
@@ -29,6 +28,7 @@
 #include <linux/workqueue.h>
 #include <linux/spinlock_types.h>
 #include <linux/spinlock.h>
+#include <linux/genalloc.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Xiangyu Ren <180110718@mail.hit.edu.cn>");
@@ -74,15 +74,21 @@ enum {
  * message sent via ring buffer, as header of the payloads
 */
 typedef struct ringbuf_msg_hd {
+
 	unsigned int src_qid;
 
 	unsigned int payload_off;
 	ssize_t payload_len;
+
 } rbmsg_hd;
 
 typedef struct payload_pt_node {
+
+	unsigned long offset;
+	size_t len;
+
 	struct list_head list_node;
-	unsigned int offset;
+	
 } payload_pt_node;
 
 typedef STRUCT_KFIFO(char, RINGBUF_SZ) fifo;
@@ -96,6 +102,7 @@ typedef STRUCT_KFIFO(char, RINGBUF_SZ) fifo;
 */
 
 typedef struct ringbuf_device {
+
 	struct pci_dev		*dev;
 	int			minor;
 
@@ -119,12 +126,13 @@ typedef struct ringbuf_device {
 	fifo*			fifo_addr;
 	unsigned int 		*notify_in_addr;
 	unsigned int 		*notify_out_addr;
+	unsigned int 		notify_in_history;
+	unsigned int 		notify_out_history;
 	
 	unsigned int 		role;
 	void __iomem		*payload_area;
 	struct list_head 	*payload_list;
-	unsigned int 		notify_in_history;
-	unsigned int 		notify_out_history;
+	struct gen_pool		*payload_pool;
 
 } ringbuf_device;
 
@@ -152,6 +160,7 @@ static void ringbuf_notify(void);
 static void ringbuf_unnotify(void);
 
 static void ringbuf_readmsg(struct tasklet_struct* data);
+static unsigned long add_payload(size_t len);
 static void free_payload(struct tasklet_struct* data);
 
 
@@ -163,7 +172,7 @@ DECLARE_TASKLET(read_msg_tasklet, ringbuf_readmsg);
 DECLARE_TASKLET(free_payload_tasklet, free_payload);
 
 static ringbuf_device ringbuf_dev;
-static unsigned int payload_pt;
+// static unsigned int payload_pt;
 static int device_major_nr;
 
 
@@ -202,7 +211,6 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
         	break;
 
 	case IOCTL_WAIT:
-		printk(KERN_INFO "wait for interrupt\n");
 		// todo: poll
 		break;
 
@@ -290,7 +298,13 @@ static void ringbuf_fifo_init(void)
 	if(dev->role == Producer) {
 		dev->payload_list = kmalloc(sizeof(*(dev->payload_list)), GFP_KERNEL);
 		INIT_LIST_HEAD(dev->payload_list);
-		payload_pt = 0;
+		// payload_pt = 0;
+		dev->payload_pool = gen_pool_create(0, -1);
+		if(gen_pool_add(dev->payload_pool, (unsigned long)(dev->payload_area),
+									3 << 20, -1)) {
+			printk(KERN_INFO "gen_pool create failed!!!!!");
+			return;
+		}
 	}
 
 	printk(KERN_INFO "Check if the ring buffer is already init");
@@ -317,17 +331,34 @@ static void ringbuf_readmsg(struct tasklet_struct* data)
 	printk(KERN_INFO "recv msg: %s\n", recv);
 }
 
-static void add_payload(unsigned int payload_pt) 
+static unsigned long add_payload(size_t len) 
 {
+	unsigned long payload_addr;
 	payload_pt_node *new_node;
-	new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+	unsigned long offset;
 
-	new_node->offset = payload_pt;
+	payload_addr = gen_pool_alloc(ringbuf_dev.payload_pool, len);
+	new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
+	offset = payload_addr - (unsigned long)ringbuf_dev.payload_area;
+
+	new_node->offset = offset;
+	new_node->len = len;
 	list_add(&(new_node->list_node), ringbuf_dev.payload_list);
+
+	// printk(KERN_INFO "alloc payload memory at offset: %lu\n", offset);
+	return offset;
 }
 
 static void free_payload(struct tasklet_struct* data)
 {
+	struct payload_pt_node* node = 
+		container_of(ringbuf_dev.payload_list->prev, 
+				struct payload_pt_node, list_node);
+	gen_pool_free(ringbuf_dev.payload_pool, 
+			(unsigned long)ringbuf_dev.payload_area + node->offset,
+			node->len);
+
+	// printk(KERN_INFO "free payload memory at offset: %lu\n", node->offset);
 	list_del(ringbuf_dev.payload_list->prev);
 }
 
@@ -395,10 +426,9 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 	}
 
 	hd.src_qid = QEMU_PROCESS_ID;
-	hd.payload_off = payload_pt;
+	hd.payload_off = add_payload(len);
 	hd.payload_len = len;
 	memcpy(ringbuf_dev.payload_area + hd.payload_off, buffer, len);
-	add_payload(payload_pt);
 
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 	mb();
@@ -409,7 +439,7 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 	}
 
 	ringbuf_notify();
-	payload_pt += len;
+	// payload_pt += len;
 	return 0;
 
 err:
@@ -440,7 +470,8 @@ static int ringbuf_release(struct inode * inode, struct file * filp)
 {
 	if(ringbuf_dev.fifo_addr != NULL) {
 		//TODO: free the payloads linklist !!!!!!!!!!!!!!!!!!!!!!!
-		payload_pt = 0;
+		//TODO: free the payloads poll!!!!!!!!!!!!!!
+		// payload_pt = 0;
 		printk(KERN_INFO "ring buffer is being freed");
 		kfifo_free(ringbuf_dev.fifo_addr);
 	}
