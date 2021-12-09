@@ -55,6 +55,12 @@ MODULE_VERSION("1.0");
 static int ROLE = 1;
 MODULE_PARM_DESC(ROLE, "Role of this ringbuf device.");
 module_param(ROLE, int, 0400);
+static int PCIID = 0;
+MODULE_PARM_DESC(PCIID, "ID of this pci_dev in pci_name.");
+module_param(PCIID, int ,0400);
+static char *DEVNAME = "ringbuf";
+MODULE_PARM_DESC(PCIID, "Name of this ringbuf device.");
+module_param(DEVNAME, charp ,0400);
 
 /* KVM Inter-VM shared memory device register offsets */
 enum {
@@ -158,6 +164,7 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,
 static void ringbuf_poll(struct work_struct *work);
 static void ringbuf_notify(void);
 static void ringbuf_unnotify(void);
+static irqreturn_t ringbuf_interrupt(int irq, void *dev_instance);
 
 static void ringbuf_readmsg(struct tasklet_struct* data);
 static unsigned long add_payload(size_t len);
@@ -192,12 +199,11 @@ static struct pci_device_id ringbuf_id_table[] = {
 MODULE_DEVICE_TABLE(pci, ringbuf_id_table);
 
 static struct pci_driver ringbuf_pci_driver = {
-	.name		= 	"ringbuf",
+	.name		= 	"RINGBUF",
 	.id_table	= 	ringbuf_id_table,
 	.probe	   	= 	ringbuf_probe_device,
 	.remove	  	= 	ringbuf_remove_device,
 };
-
 
 
 static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value)
@@ -227,21 +233,22 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 }
 
 static void ringbuf_poll(struct work_struct *work) {
-	void __iomem *int_addr;
-	unsigned int *writeto;
+	// void __iomem *int_addr;
+	// unsigned int *writeto;
 	ringbuf_device *dev = &ringbuf_dev;
 
-	int_addr = ioremap(0xfee01004, 16);
-	if (!int_addr) 
-		printk(KERN_INFO "unable to ioremap int_addr\n");
-	writeto = (unsigned int *)int_addr;
+	// int_addr = ioremap(0xfee01004, 16);
+	// if (!int_addr) 
+	// 	printk(KERN_INFO "unable to ioremap int_addr\n");
+	// writeto = (unsigned int *)int_addr;
 	
 	switch (dev->role) {
 	case Consumer:
 		while(TRUE) {
 			if(*(dev->notify_in_addr) > dev->notify_in_history) {
-				*writeto = 0x28;
-				dev->notify_in_history = *(dev->notify_in_addr);
+				// *writeto = 0x28;
+				ringbuf_interrupt(25, &ringbuf_dev);
+				dev->notify_in_history++;
 			}
 			msleep(SLEEP_PERIOD_MSEC);
 		}
@@ -249,8 +256,9 @@ static void ringbuf_poll(struct work_struct *work) {
 	case Producer:
 		while(TRUE) {
 			if(*(dev->notify_out_addr) > dev->notify_out_history) {
-				*writeto = 0x29;
-				dev->notify_out_history = *(dev->notify_out_addr);
+				// *writeto = 0x29;
+				ringbuf_interrupt(26, &ringbuf_dev);
+				dev->notify_out_history++;
 			}
 			msleep(SLEEP_PERIOD_MSEC);
 		}
@@ -274,7 +282,7 @@ static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 	if (unlikely(dev == NULL))
 		return IRQ_NONE;
 
-	// printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
+	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
 	switch (irq)
 	{
 	case 25:
@@ -486,7 +494,9 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 {
 	int ret;
 	struct ringbuf_device *dev = &ringbuf_dev;
-	printk(KERN_INFO "probing for device\n");
+	printk(KERN_INFO "probing for device: %s\n", (pci_name(pdev)));
+	if((int)pci_name(pdev)[9] - 48 != PCIID)
+		return -1;
 
 	ret = pci_enable_device(pdev);
 	if (ret < 0) {
@@ -494,7 +504,7 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 		goto out;
 	}
 
-	ret = pci_request_regions(pdev, "ringbuf");
+	ret = pci_request_regions(pdev, DEVNAME);
 	if (ret < 0) {
 		printk(KERN_INFO "unable to reserve resources: %d\n", ret);
 		goto disable_device;
@@ -610,14 +620,15 @@ static void ringbuf_remove_device(struct pci_dev* pdev)
 static void __exit ringbuf_cleanup(void)
 {
 	pci_unregister_driver(&ringbuf_pci_driver);
-	unregister_chrdev(device_major_nr, "ringbuf");
+	unregister_chrdev(device_major_nr, DEVNAME);
 }
 
 static int __init ringbuf_init(void)
 {
     	int err = -ENOMEM;
 
-	err = register_chrdev(0, "ringbuf", &ringbuf_ops);
+	ringbuf_pci_driver.name = DEVNAME;
+	err = register_chrdev(0, DEVNAME, &ringbuf_ops);
 	if (err < 0) {
 		printk(KERN_ERR "Unable to register ringbuf device\n");
 		return err;
@@ -633,7 +644,7 @@ static int __init ringbuf_init(void)
 	return 0;
 
 error:
-	unregister_chrdev(device_major_nr, "ringbuf");
+	unregister_chrdev(device_major_nr, DEVNAME);
 	return err;
 }
 
@@ -663,7 +674,7 @@ static int request_msix_vectors(struct ringbuf_device *dev, int n)
 
 	for (i = 0; i < alloc_nums; i++) {
 		snprintf(dev->msix_names[i], sizeof(*dev->msix_names),
-			"%s%d-%d", "ringbuf", dev->minor, i);
+			"%s%d-%d", DEVNAME, dev->minor, i);
 
 		irq_number = pci_irq_vector(dev->dev, i);
 		ret = request_irq(irq_number, ringbuf_interrupt,

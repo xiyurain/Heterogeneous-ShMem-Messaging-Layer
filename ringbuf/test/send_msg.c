@@ -24,11 +24,14 @@ int __init sendmsg_init(void)
         int i, cyc = 50;
         long ivposition;
         char msg[256];
+        printk(KERN_INFO "11111111111111111111\n");
 
+        // while(fp->f_op == NULL)
         fp = filp_open("/dev/ringbuf", O_RDWR, 0644);
+        printk(KERN_INFO "22222222222222222222222\n");
         ivposition = fp->f_op->unlocked_ioctl(fp, IOCTL_IVPOSITION, 0);
-
-        printk("send_message test case start.\n");
+        printk(KERN_INFO "333333333333333333333\n");
+        printk(KERN_INFO "send_message test case start.\n");
         for(i = 0; i < cyc; i++) {
                 sprintf(msg, "MSG #%d   from peer%ld   (jiffies: %lu)", i, ivposition, jiffies);
                 fp->f_op->write(fp, msg, strlen(msg) + 1, &pos);
