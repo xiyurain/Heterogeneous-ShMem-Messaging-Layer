@@ -55,12 +55,18 @@ MODULE_VERSION("1.0");
 static int ROLE = 1;
 MODULE_PARM_DESC(ROLE, "Role of this ringbuf device.");
 module_param(ROLE, int, 0400);
+
 static int PCIID = 0;
 MODULE_PARM_DESC(PCIID, "ID of this pci_dev in pci_name.");
 module_param(PCIID, int ,0400);
+
 static char *DEVNAME = "ringbuf";
 MODULE_PARM_DESC(PCIID, "Name of this ringbuf device.");
 module_param(DEVNAME, charp ,0400);
+
+static int NODEID = 3;
+MODULE_PARM_DESC(NODEID, "Node ID of the shmem QEMU.");
+module_param(NODEID, int, 0400);
 
 /* KVM Inter-VM shared memory device register offsets */
 enum {
@@ -179,7 +185,6 @@ DECLARE_TASKLET(read_msg_tasklet, ringbuf_readmsg);
 DECLARE_TASKLET(free_payload_tasklet, free_payload);
 
 static ringbuf_device ringbuf_dev;
-// static unsigned int payload_pt;
 static int device_major_nr;
 
 
@@ -221,8 +226,8 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 		break;
 
 	case IOCTL_IVPOSITION:
-		printk(KERN_INFO "get ivposition: %u\n", dev->ivposition);
-		return dev->ivposition;
+		printk(KERN_INFO "get ivposition: %d\n", NODEID);
+		return (long)NODEID;
 
 	default:
 		printk(KERN_INFO "bad ioctl command: %d\n", cmd);
@@ -233,20 +238,12 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 }
 
 static void ringbuf_poll(struct work_struct *work) {
-	// void __iomem *int_addr;
-	// unsigned int *writeto;
 	ringbuf_device *dev = &ringbuf_dev;
 
-	// int_addr = ioremap(0xfee01004, 16);
-	// if (!int_addr) 
-	// 	printk(KERN_INFO "unable to ioremap int_addr\n");
-	// writeto = (unsigned int *)int_addr;
-	
 	switch (dev->role) {
 	case Consumer:
 		while(TRUE) {
 			if(*(dev->notify_in_addr) > dev->notify_in_history) {
-				// *writeto = 0x28;
 				ringbuf_interrupt(25, &ringbuf_dev);
 				dev->notify_in_history++;
 			}
@@ -256,7 +253,6 @@ static void ringbuf_poll(struct work_struct *work) {
 	case Producer:
 		while(TRUE) {
 			if(*(dev->notify_out_addr) > dev->notify_out_history) {
-				// *writeto = 0x29;
 				ringbuf_interrupt(26, &ringbuf_dev);
 				dev->notify_out_history++;
 			}
@@ -282,7 +278,7 @@ static irqreturn_t ringbuf_interrupt (int irq, void *dev_instance)
 	if (unlikely(dev == NULL))
 		return IRQ_NONE;
 
-	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
+	// printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
 	switch (irq)
 	{
 	case 25:
@@ -306,7 +302,6 @@ static void ringbuf_fifo_init(void)
 	if(dev->role == Producer) {
 		dev->payload_list = kmalloc(sizeof(*(dev->payload_list)), GFP_KERNEL);
 		INIT_LIST_HEAD(dev->payload_list);
-		// payload_pt = 0;
 		dev->payload_pool = gen_pool_create(0, -1);
 		if(gen_pool_add(dev->payload_pool, (unsigned long)(dev->payload_area),
 									3 << 20, -1)) {
@@ -336,7 +331,7 @@ static void ringbuf_readmsg(struct tasklet_struct* data)
 	char recv[512];
 
 	ringbuf_read(NULL, recv, 512, 0);
-	printk(KERN_INFO "recv msg: %s\n", recv);
+	printk(KERN_INFO "RECEIVED new msg <<<= %s\n", recv);
 }
 
 static unsigned long add_payload(size_t len) 
@@ -447,7 +442,6 @@ static ssize_t ringbuf_write(struct file * filp, const char * buffer,
 	}
 
 	ringbuf_notify();
-	// payload_pt += len;
 	return 0;
 
 err:

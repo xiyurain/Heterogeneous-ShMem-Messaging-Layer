@@ -1,0 +1,6 @@
+make --dry-run --always-make --keep-going --print-directory
+make: Entering directory '/home/iv_shmem-on-pcie'
+make: Leaving directory '/home/iv_shmem-on-pcie'
+ 
+make: *** No targets specified and no makefile found.  Stop.
+ 
