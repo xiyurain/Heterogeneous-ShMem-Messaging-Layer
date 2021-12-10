@@ -10,14 +10,17 @@
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 
-extern unsigned long volatile jiffies;
-
 #define IOCTL_MAGIC		('f')
 #define IOCTL_RING		_IOW(IOCTL_MAGIC, 1, u32)
 #define IOCTL_WAIT		_IO(IOCTL_MAGIC, 2)
 #define IOCTL_IVPOSITION	_IOR(IOCTL_MAGIC, 3, u32)
- 
-int __init sendmsg_init(void)
+
+extern unsigned long volatile jiffies;
+struct workqueue_struct *write_workqueue;
+static void write_msg(struct work_struct *work);
+DECLARE_WORK(write_work, write_msg);
+
+static void write_msg(struct work_struct *work) 
 {
         struct file *fp = NULL;
         loff_t pos = 0;
@@ -30,14 +33,20 @@ int __init sendmsg_init(void)
         msleep(10000);
         printk(KERN_INFO "send_message test case start.\n");
         for(i = 0; i < cyc; i++) {
-                sprintf(msg, "MSG #%d - @peer%ld - (jiffies: %lu)", i, ivposition, jiffies);
+                sprintf(msg, "msg #%2d - @peer%2ld - (jiffies: %lu)", i, ivposition, jiffies);
                 fp->f_op->write(fp, msg, strlen(msg) + 1, &pos);
-                printk(KERN_INFO "msg broadcasted=> %s", msg);
+                // printk(KERN_INFO "BROADCASTED  =>>> %s", msg);
                 msleep(2000);
         }
         
         filp_close(fp, NULL);
         fp = NULL;
+}
+ 
+int __init sendmsg_init(void)
+{
+        write_workqueue = create_workqueue("write_workqueue");
+        queue_work(write_workqueue, &write_work);
         return 0;
 }
 

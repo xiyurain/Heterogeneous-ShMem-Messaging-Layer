@@ -177,7 +177,7 @@ static unsigned long add_payload(size_t len);
 static void free_payload(struct tasklet_struct* data);
 
 
-DECLARE_WAIT_QUEUE_HEAD(wait_queue_poll);
+// DECLARE_WAIT_QUEUE_HEAD(wait_queue_poll);
 struct workqueue_struct *poll_workqueue;
 DECLARE_WORK(poll_work, ringbuf_poll);
 
@@ -331,7 +331,7 @@ static void ringbuf_readmsg(struct tasklet_struct* data)
 	char recv[512];
 
 	ringbuf_read(NULL, recv, 512, 0);
-	printk(KERN_INFO "RECEIVED new msg <<<= %s\n", recv);
+	printk(KERN_INFO "RECEIVED     <<<= %s\n", recv);
 }
 
 static unsigned long add_payload(size_t len) 
