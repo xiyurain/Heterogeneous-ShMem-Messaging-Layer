@@ -2,7 +2,7 @@ ifneq ($(KERNELRELEASE),)
 	obj-m := ringbuf_r2.o
 
 else
-	KERNELDIR ?= /home/popcorn/kernel_src/linux-5.15.1/
+	KERNELDIR ?= /home/kernel_src/linux-5.15.1/
 	PWD := $(shell pwd)
 
 default:
