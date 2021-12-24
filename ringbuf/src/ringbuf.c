@@ -47,7 +47,7 @@ MODULE_VERSION("1.0");
 
 #define IOCTL_MAGIC		('f')
 #define IOCTL_RING		_IOW(IOCTL_MAGIC, 1, u32)
-#define IOCTL_WAIT		_IO(IOCTL_MAGIC, 2)
+#define IOCTL_REQ		_IO(IOCTL_MAGIC, 2)
 #define IOCTL_IVPOSITION	_IOR(IOCTL_MAGIC, 3, u32)
 #define IVPOSITION_REG_OFF	0x08
 #define DOORBELL_REG_OFF	0x0c
@@ -68,10 +68,16 @@ static int NODEID = 3;
 MODULE_PARM_DESC(NODEID, "Node ID of the shmem QEMU.");
 module_param(NODEID, int, 0400);
 
-/* Consumer(read) or Producer(write) role of ring buffer*/
+/* Guest(read) or Host(write) role of ring buffer*/
 enum {
-	Consumer	= 	0,
-	Producer	=	1,
+	Guest	= 	0,
+	Host	=	1,
+};
+
+enum {
+	msg_type_req 	=	1,
+	msg_type_add	=	2,
+	msg_type_free	=	3,
 };
 
 /*
@@ -123,10 +129,10 @@ typedef struct ringbuf_device {
 	fifo*			fifo_host_addr;
 	fifo*			fifo_guest_addr;
 
-	unsigned int 		*notify_in_addr;
-	unsigned int 		*notify_out_addr;
-	unsigned int 		notify_in_history;
-	unsigned int 		notify_out_history;
+	unsigned int 		*notify_guest_addr;
+	unsigned int 		*notify_host_addr;
+	unsigned int 		notify_guest_history;
+	unsigned int 		notify_host_history;
 	
 	unsigned int 		role;
 	void __iomem		*payload_area;
@@ -158,22 +164,29 @@ static void ringbuf_notify(void);
 static void ringbuf_unnotify(void);
 static irqreturn_t ringbuf_interrupt(int irq, void *dev_instance);
 
-static void ringbuf_readmsg(struct tasklet_struct* data);
 static void ringbuf_sendreq(struct tasklet_struct* data);
 static void freepld_handler(struct tasklet_struct* data);
 
 static unsigned long add_payload(size_t len);
-static unsigned int read_msg();
+static unsigned int recv_msg();
 static unsigned int send_msg();
+
+int handle_msg_type_req(rbmsg_hd *hd);
 
 struct workqueue_struct *poll_workqueue;
 DECLARE_WORK(poll_work, ringbuf_poll);
 
-DECLARE_TASKLET(read_msg_tasklet, ringbuf_readmsg);
+DECLARE_TASKLET(recv_msg_tasklet, recv_msg);
 DECLARE_TASKLET(free_payload_tasklet, free_payload);
 
 static ringbuf_device ringbuf_dev;
 static int device_major_nr;
+
+typedef int (*msg_handler)(rbmsg_hd *);
+static msg_handler msg_handlers[16] = { NULL };
+msg_handlers[msg_type_req] = handle_msg_type_req;
+msg_handlers[msg_type_add] = handle_msg_type_add;
+msg_handlers[msg_type_free] = handle_msg_type_free;
 
 
 static const struct file_operations ringbuf_ops = {
@@ -203,14 +216,28 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 {
 	ringbuf_device *dev = &ringbuf_dev;
     	BUG_ON(dev->base_addr == NULL);
+	unsigned int req_id;
+	unsigned int req_address;
+	rbmsg_hd hd;
 
     	switch (cmd) {
     	case IOCTL_RING:
-        	// todo: notify
         	break;
 
-	case IOCTL_WAIT:
-		// todo: poll
+	case IOCTL_REQ:
+		if(dev->role == Host) {
+			printk(KERN_INFO "Host CAN'T REQ!!");
+			return -1;
+		}
+		req_id = (value >> 32) & 0xFFFFFFFF;
+		req_address = value & 0xFFFFFFFF;
+
+		hd.msg_type = msg_type_req;
+		hd.src_qid = QEMU_PROCESS_ID;
+		hd.payload_off = req_address;
+		hd.payload_len = 0;
+
+		send_msg(dev->fifo_guest_addr, &hd, dev->notify_host_addr);
 		break;
 
 	case IOCTL_IVPOSITION:
@@ -229,20 +256,20 @@ static void ringbuf_poll(struct work_struct *work) {
 	ringbuf_device *dev = &ringbuf_dev;
 
 	switch (dev->role) {
-	case Consumer:
+	case Guest:
 		while(TRUE) {
-			if(*(dev->notify_in_addr) > dev->notify_in_history) {
+			if(*(dev->notify_host_addr) > dev->notify_host_history) {
 				ringbuf_interrupt(25);
-				dev->notify_in_history++;
+				dev->notify_host_history++;
 			}
 			msleep(SLEEP_PERIOD_MSEC);
 		}
 		break;
-	case Producer:
+	case Host:
 		while(TRUE) {
-			if(*(dev->notify_out_addr) > dev->notify_out_history) {
-				ringbuf_interrupt(26);
-				dev->notify_out_history++;
+			if(*(dev->notify_guest_addr) > dev->notify_guest_history) {
+				ringbuf_interrupt(25);
+				dev->notify_guest_history++;
 			}
 			msleep(SLEEP_PERIOD_MSEC);
 		}
@@ -251,12 +278,8 @@ static void ringbuf_poll(struct work_struct *work) {
 	}
 }
 
-static inline void ringbuf_notify(void) {
-	(*ringbuf_dev.notify_in_addr)++;
-}
-
-static inline void ringbuf_unnotify(void) {
-	(*ringbuf_dev.notify_out_addr)++;
+static inline void ringbuf_notify(void *addr) {
+	(*addr)++;
 }
 
 static irqreturn_t ringbuf_interrupt (int irq)
@@ -265,10 +288,7 @@ static irqreturn_t ringbuf_interrupt (int irq)
 	switch (irq)
 	{
 	case 25:
-		tasklet_schedule(&read_msg_tasklet);
-		break;
-	case 26:
-		tasklet_schedule(&free_payload_tasklet);
+		tasklet_schedule(&recv_msg_tasklet);
 		break;
 	default:
 		break;
@@ -282,7 +302,7 @@ static void ringbuf_fifo_init(void)
 	fifo fifo_indevice;
 	ringbuf_device *dev = &ringbuf_dev;
 
-	if(dev->role == Producer) {
+	if(dev->role == Host) {
 		dev->payload_list = kmalloc(sizeof(*(dev->payload_list)), GFP_KERNEL);
 		INIT_LIST_HEAD(dev->payload_list);
 		dev->payload_pool = gen_pool_create(0, -1);
@@ -313,19 +333,30 @@ static void ringbuf_fifo_init(void)
 	queue_work(poll_workqueue, &poll_work);
 }
 
+int handle_msg_type_req(rbmsg_hd *hd) 
+{
+	fifo* fifo_host_addr = ringbuf_dev.fifo_host_addr;
+	rbmsg_hd new_hd;
+
+	new_hd.src_qid = QEMU_PROCESS_ID;
+	new_hd.msg_type = msg_type_add;
+	new_hd.payload_off = add_payload(len);
+	new_hd.payload_len = len;
+
+	memcpy(ringbuf_dev.payload_area + hd.payload_off, buffer, len);
+	rmb();
+	send_msg(fifo_addr, &new_hd);
+
+	return 0;
+}
+
 static unsigned long add_payload(size_t len) 
 {
 	unsigned long payload_addr;
-	payload_pt_node *new_node;
 	unsigned long offset;
 
 	payload_addr = gen_pool_alloc(ringbuf_dev.payload_pool, len);
-	new_node = kmalloc(sizeof(*new_node), GFP_KERNEL);
 	offset = payload_addr - (unsigned long)ringbuf_dev.payload_area;
-
-	new_node->offset = offset;
-	new_node->len = len;
-	list_add(&(new_node->list_node), ringbuf_dev.payload_list);
 
 	// printk(KERN_INFO "alloc payload memory at offset: %lu\n", offset);
 	return offset;
@@ -333,20 +364,22 @@ static unsigned long add_payload(size_t len)
 
 static void free_payload(struct tasklet_struct* data)
 {
-	struct payload_pt_node* node = 
-		container_of(ringbuf_dev.payload_list->prev, 
-				struct payload_pt_node, list_node);
 	gen_pool_free(ringbuf_dev.payload_pool, 
 			(unsigned long)ringbuf_dev.payload_area + node->offset,
 			node->len);
 
 	// printk(KERN_INFO "free payload memory at offset: %lu\n", node->offset);
-	list_del(ringbuf_dev.payload_list->prev);
 }
 
+static int recv_msg(rbmsg_hd* hd) 
+{	
+	fifo *fifo_addr;
+	if(ringbuf_dev.role == Host) {
+		fifo_addr = ringbuf_dev.fifo_guest_addr;
+	} else {
+		fifo_addr = ringbuf_dev.fifo_host_addr;
+	}
 
-static rbmsg_hd recv_msg(fifo *fifo_addr, rbmsg_hd* hd) 
-{
 	if(kfifo_len(fifo_addr) < MSG_SZ) {
 		printk(KERN_ERR "no msg in ring buffer\n");
 		return 0;
@@ -367,13 +400,8 @@ static rbmsg_hd recv_msg(fifo *fifo_addr, rbmsg_hd* hd)
 static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, 
 							loff_t *offset)
 {
-	fifo *fifo_host_addr = ringbuf_dev.fifo_host_addr;
+	
 
-	/* if the device role is not Consumer, than not allowed to read */
-	if(ringbuf_dev.role != Consumer) {
-		printk(KERN_ERR "ringbuf: not allowed to read \n");
-		return 0;
-	}
 	if(!ringbuf_dev.base_addr || !fifo_host_addr) {
 		printk(KERN_ERR "ringbuf: cannot read from addr (NULL)\n");
 		return 0;
@@ -385,7 +413,7 @@ static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len,
 	return 0;
 }
 
-static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd) 
+static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr) 
 {
 	rbmsg_hd hd;
 
@@ -398,27 +426,16 @@ static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd)
 	rmb();
 	kfifo_in(fifo_addr, (char*)hd, MSG_SZ);
 
+	ringbuf_notify(notify_addr);
 	return 0;
 }
 
 static ssize_t ringbuf_write(struct file * filp, const char * buffer, 
 					size_t len, loff_t *offset)
 {
-	fifo* fifo_host_addr = ringbuf_dev.fifo_host_addr;
-
-	if(ringbuf_dev.role != Producer) {
-		printk(KERN_ERR "ringbuf: not allowed to write \n");
-		return 0;
-	}
-	if(!ringbuf_dev.base_addr || !fifo_host_addr) {
-		printk(KERN_ERR "ringbuf: cannot read from addr (NULL)\n");
-		return 0;
-	}
 	
-	hd.src_qid = QEMU_PROCESS_ID;
-	hd.payload_off = add_payload(len);
-	hd.payload_len = len;
-	memcpy(ringbuf_dev.payload_area + hd.payload_off, buffer, len);
+	
+	
 
 	ringbuf_notify();
 	return 0;
