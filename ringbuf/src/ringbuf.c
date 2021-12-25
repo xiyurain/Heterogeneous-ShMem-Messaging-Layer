@@ -315,7 +315,7 @@ static int handle_msg_type_add(rbmsg_hd *hd)
 	char buffer[64];
 
 	memcpy(buffer, ringbuf_dev.payload_area + hd->payload_off, 
-			MIN(len, hd->payload_len));
+						hd->payload_len);
 	
 	printk(KERN_INFO "RECEIVED     <<<= %s\n", buffer);
 
@@ -370,6 +370,7 @@ static void recv_msg(struct tasklet_struct* data)
 {	
 	msg_handler handler = NULL;
 	rbmsg_hd hd;
+	size_t ret_len;
 
 	fifo *fifo_addr;
 	if(ringbuf_dev.role == Host) {
@@ -385,7 +386,7 @@ static void recv_msg(struct tasklet_struct* data)
 
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 	mb();
-	kfifo_out(fifo_addr, (char*)&hd, MSG_SZ);
+	ret_len = kfifo_out(fifo_addr, (char*)&hd, MSG_SZ);
 		
 	if(hd.src_qid != QEMU_PROCESS_ID) {
 		printk(KERN_ERR "invalid ring buffer msg\n");
@@ -411,17 +412,17 @@ static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr)
 	return 0;
 }
 
-static ssize_t ringbuf_write(struct file * filp, const char * buffer, 
-					size_t len, loff_t *offset)
-{
-	return 0;
-}
+// static ssize_t ringbuf_write(struct file * filp, const char * buffer, 
+// 					size_t len, loff_t *offset)
+// {
+// 	return 0;
+// }
 
-static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, 
-							loff_t *offset)
-{
-	return 0;
-}
+// static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, 
+// 							loff_t *offset)
+// {
+// 	return 0;
+// }
 
 static void ringbuf_fifo_init(void) 
 {
@@ -579,13 +580,16 @@ static void ringbuf_remove_device(struct pci_dev* pdev)
 	//TODO: free the payloads pool!!!!!!!!!!!!!!
 	dev->dev = NULL;
 
-	iounmap(dev->bar0_addr);
-	iounmap(dev->bar2_addr);
+	iounmap(dev->regs_addr);
+	iounmap(dev->base_addr);
 
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);
 
 	destroy_workqueue(poll_workqueue);
+	unregister_msg_handler(msg_type_req);
+	unregister_msg_handler(msg_type_add);
+	unregister_msg_handler(msg_type_free);
 }
 
 static void __exit ringbuf_cleanup(void)

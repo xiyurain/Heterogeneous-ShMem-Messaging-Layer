@@ -12,7 +12,7 @@
 
 #define IOCTL_MAGIC		('f')
 #define IOCTL_RING		_IOW(IOCTL_MAGIC, 1, u32)
-#define IOCTL_WAIT		_IO(IOCTL_MAGIC, 2)
+#define IOCTL_REQ		_IO(IOCTL_MAGIC, 2)
 #define IOCTL_IVPOSITION	_IOR(IOCTL_MAGIC, 3, u32)
 
 extern unsigned long volatile jiffies;
@@ -23,19 +23,19 @@ DECLARE_WORK(write_work, write_msg);
 static void write_msg(struct work_struct *work) 
 {
         struct file *fp = NULL;
-        loff_t pos = 0;
         int i, cyc = 50;
         long ivposition;
         char msg[256];
 
+        printk(KERN_INFO "----1\n");
         fp = filp_open("/dev/ringbuf2", O_RDWR, 0644);
         ivposition = fp->f_op->unlocked_ioctl(fp, IOCTL_IVPOSITION, 0);
         msleep(10000);
+        printk(KERN_INFO "----2\n");
         printk(KERN_INFO "send_message test case start.\n");
         for(i = 0; i < cyc; i++) {
-                sprintf(msg, "msg #%2d - @peer%2ld - (jiffies: %lu)", i, ivposition, jiffies);
-                fp->f_op->write(fp, msg, strlen(msg) + 1, &pos);
-                // printk(KERN_INFO "BROADCASTED  =>>> %s", msg);
+                fp->f_op->unlocked_ioctl(fp, IOCTL_REQ, ivposition);
+                printk(KERN_INFO "BROADCASTED  =>>> %s", msg);
                 msleep(2000);
         }
         
