@@ -245,7 +245,7 @@ static void ringbuf_poll(struct work_struct *work) {
 	ringbuf_device *dev = &ringbuf_dev;
 
 	switch (dev->role) {
-	case Guest:
+	case Host:
 		while(TRUE) {
 			if(*(dev->notify_host_addr) > dev->notify_host_history) {
 				ringbuf_interrupt(25);
@@ -254,7 +254,7 @@ static void ringbuf_poll(struct work_struct *work) {
 			msleep(SLEEP_PERIOD_MSEC);
 		}
 		break;
-	case Host:
+	case Guest:
 		while(TRUE) {
 			if(*(dev->notify_guest_addr) > dev->notify_guest_history) {
 				ringbuf_interrupt(25);

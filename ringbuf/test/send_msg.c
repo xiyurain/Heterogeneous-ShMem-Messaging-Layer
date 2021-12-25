@@ -27,11 +27,9 @@ static void write_msg(struct work_struct *work)
         long ivposition;
         char msg[256];
 
-        printk(KERN_INFO "----1\n");
         fp = filp_open("/dev/ringbuf", O_RDWR, 0644);
         ivposition = fp->f_op->unlocked_ioctl(fp, IOCTL_IVPOSITION, 0);
         msleep(10000);
-        printk(KERN_INFO "----2\n");
         printk(KERN_INFO "send_message test case start.\n");
         for(i = 0; i < cyc; i++) {
                 fp->f_op->unlocked_ioctl(fp, IOCTL_REQ, ivposition);
