@@ -222,7 +222,7 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 		req_address = value & 0xFFFFFFFF;
 
 		hd.msg_type = msg_type_req;
-		hd.src_qid = QEMU_PROCESS_ID;
+		hd.src_qid = ringbuf_dev.ivposition;
 		hd.payload_off = req_address;
 		hd.payload_len = 0;
 
@@ -290,20 +290,21 @@ static int handle_msg_type_req(rbmsg_hd *hd)
 {
 	fifo* fifo_addr = ringbuf_dev.fifo_host_addr;
 	rbmsg_hd new_hd;
-	char buffer[64];
+	char buffer[256];
 	size_t len;
 
-	sprintf(buffer, "msg #%2d - @peer%2d - (jiffies: %lu)",
-			hd->payload_off, ringbuf_dev.ivposition, jiffies);
+	sprintf(buffer, "msg dst_id=%d src_id=%d - (jiffies: %lu)",
+			hd->src_qid, ringbuf_dev.ivposition, jiffies);
 	len = strlen(buffer) + 1;
 
-	new_hd.src_qid = QEMU_PROCESS_ID;
+	new_hd.src_qid = ringbuf_dev.ivposition;
 	new_hd.msg_type = msg_type_add;
 	new_hd.payload_off = add_payload(len);
 	new_hd.payload_len = len;
 
-	memcpy(ringbuf_dev.payload_area + hd->payload_off, buffer, len);
-	rmb();
+	memcpy(ringbuf_dev.payload_area + new_hd.payload_off, buffer, len);
+	wmb();
+
 	send_msg(fifo_addr, &new_hd, ringbuf_dev.notify_guest_addr);
 
 	return 0;
@@ -312,12 +313,14 @@ static int handle_msg_type_req(rbmsg_hd *hd)
 static int handle_msg_type_add(rbmsg_hd *hd)
 {
 	fifo* fifo_addr = ringbuf_dev.fifo_guest_addr;
-	char buffer[64];
+	char buffer[256];
+
 
 	memcpy(buffer, ringbuf_dev.payload_area + hd->payload_off, 
 						hd->payload_len);
+	rmb();
 	
-	printk(KERN_INFO "RECEIVED     <<<= %s\n", buffer);
+	printk(KERN_INFO "PAYLOAD_CONTENT: %s\n", buffer);
 
 	hd->msg_type = msg_type_free;
 	send_msg(fifo_addr, hd, ringbuf_dev.notify_host_addr);
@@ -388,7 +391,7 @@ static void recv_msg(struct tasklet_struct* data)
 	mb();
 	ret_len = kfifo_out(fifo_addr, (char*)&hd, MSG_SZ);
 		
-	if(hd.src_qid != QEMU_PROCESS_ID) {
+	if(!hd.src_qid) {
 		printk(KERN_ERR "invalid ring buffer msg\n");
 		return;
 	} else {
@@ -411,18 +414,6 @@ static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr)
 	ringbuf_notify(notify_addr);
 	return 0;
 }
-
-// static ssize_t ringbuf_write(struct file * filp, const char * buffer, 
-// 					size_t len, loff_t *offset)
-// {
-// 	return 0;
-// }
-
-// static ssize_t ringbuf_read(struct file * filp, char * buffer, size_t len, 
-// 							loff_t *offset)
-// {
-// 	return 0;
-// }
 
 static void ringbuf_fifo_init(void) 
 {
@@ -609,6 +600,7 @@ static int __init ringbuf_init(void)
 		return err;
 	}
 	device_major_nr = err;
+	ringbuf_dev.ivposition = NODEID;
 	printk("RINGBUF: Major device number is: %d\n", device_major_nr);
 
     	err = pci_register_driver(&ringbuf_pci_driver);

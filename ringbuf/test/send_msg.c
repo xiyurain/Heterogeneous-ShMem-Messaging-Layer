@@ -33,7 +33,6 @@ static void write_msg(struct work_struct *work)
         printk(KERN_INFO "send_message test case start.\n");
         for(i = 0; i < cyc; i++) {
                 fp->f_op->unlocked_ioctl(fp, IOCTL_REQ, ivposition);
-                printk(KERN_INFO "BROADCASTED  =>>> %s", msg);
                 msleep(2000);
         }
         
