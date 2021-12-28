@@ -57,10 +57,6 @@ MODULE_VERSION("1.0");
 #define IVPOSITION_REG_OFF	0x08
 #define DOORBELL_REG_OFF	0x0c
 
-static int ROLE = 1;
-MODULE_PARM_DESC(ROLE, "Role of this ringbuf device.");
-module_param(ROLE, int, 0400);
-
 static int NODEID = 3;
 MODULE_PARM_DESC(NODEID, "Node ID of the shmem QEMU.");
 module_param(NODEID, int, 0400);
@@ -75,7 +71,8 @@ enum {
 	msg_type_req 	=	1,
 	msg_type_add	=	2,
 	msg_type_free	=	3,
-	msg_type_ping 	=	4,
+	msg_type_conn 	=	4,
+	msg_type_kalive = 	5,
 };
 
 /*
@@ -161,6 +158,7 @@ static void ringbuf_poll(struct work_struct *work);
 static void ringbuf_notify(void *addr);
 static irqreturn_t ringbuf_interrupt(ringbuf_device *dev, int irq);
 
+static void ringbuf_connect(ringbuf_device *dev);
 static void recv_msg(unsigned long data);
 static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr);
 static unsigned long add_payload(ringbuf_device *dev, size_t len);
@@ -174,6 +172,7 @@ static msg_handler msg_handlers[16] = { NULL };
 static void register_msg_handler(int msg_type, msg_handler handler);
 static void unregister_msg_handler(int msg_type);
 
+static int handle_msg_type_conn(ringbuf_device *dev, rbmsg_hd *hd);
 static int handle_msg_type_req(ringbuf_device *dev, rbmsg_hd *hd);
 static int handle_msg_type_add(ringbuf_device *dev, rbmsg_hd *hd);
 static int handle_msg_type_free(ringbuf_device *dev, rbmsg_hd *hd);
@@ -207,6 +206,7 @@ static struct pci_driver ringbuf_pci_driver = {
 static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value)
 {
 	ringbuf_device *dev;
+	ringbuf_port *port;
 	unsigned int req_id;
 	unsigned int req_address;
 	rbmsg_hd hd;
@@ -218,10 +218,18 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 
 	case IOCTL_REQ:
 		req_id = (value >> 32) & 0xFFFFFFFF;
-		for(i = 0; i < PORT_NUM_MAX; i++)
-			if(ringbuf_ports[i].src_id == req_id)
+		dev = NULL;
+		for(i = 0; i < PORT_NUM_MAX; i++) {
+			port = &ringbuf_ports[i];
+			if(port->src_id == req_id && port->device->role == Guest) {
+				dev = ringbuf_ports[i].device;
 				break;
-		dev = ringbuf_ports[i].device;
+			}
+		}
+		if(!dev) {
+			printk(KERN_INFO "unknown request src!!!\n");
+			return -1;
+		}
 
 		if(dev->role == Host) {
 			printk(KERN_INFO "Host CAN'T REQ!!");
@@ -253,7 +261,7 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 static void ringbuf_poll(struct work_struct *work) {
 	int i;
 	ringbuf_device *dev;
-
+	printk(KERN_INFO "start polling============================\n");
 	while(TRUE) {
 		for(i=0; i < PORT_NUM_MAX; i++) {
 			if(!ringbuf_ports[i].device)
@@ -265,18 +273,17 @@ static void ringbuf_poll(struct work_struct *work) {
 					ringbuf_interrupt(dev, 25);
 					dev->notify_host_history++;
 				}
-				msleep(SLEEP_PERIOD_MSEC);
 				break;
 			case Guest:
 				if(*(dev->notify_guest_addr) > dev->notify_guest_history) {
 					ringbuf_interrupt(dev, 25);
 					dev->notify_guest_history++;
 				}
-				msleep(SLEEP_PERIOD_MSEC);
 				break;
 			default: break;
 			}
 		}
+		msleep(SLEEP_PERIOD_MSEC);
 	}
 
 	
@@ -288,7 +295,7 @@ static inline void ringbuf_notify(void *addr) {
 
 static irqreturn_t ringbuf_interrupt(ringbuf_device *dev, int irq)
 {
-	// printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
+	printk(KERN_INFO "RINGBUF: interrupt: %d\n", irq);
 	switch (irq)
 	{
 	case 25:
@@ -299,6 +306,18 @@ static irqreturn_t ringbuf_interrupt(ringbuf_device *dev, int irq)
 	}
 	
 	return IRQ_HANDLED;
+}
+
+static int handle_msg_type_conn(ringbuf_device *dev, rbmsg_hd *hd) {
+	int i;
+
+	printk(KERN_INFO "got conn: %d\n", hd->src_qid);
+	for(i = 0; i < PORT_NUM_MAX; i++) {
+		if(ringbuf_ports[i].device == dev)
+			ringbuf_ports[i].src_id = hd->src_qid;
+		return 0;
+	}
+	return -1;
 }
 
 static int handle_msg_type_req(ringbuf_device *dev, rbmsg_hd *hd) 
@@ -430,6 +449,17 @@ static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr)
 	return 0;
 }
 
+static void ringbuf_connect(ringbuf_device *dev) {
+	rbmsg_hd hd;
+	hd.msg_type = msg_type_conn;
+	hd.src_qid = dev->ivposition;
+
+	if(dev->role == Host)
+		send_msg(dev->fifo_host_addr, &hd, dev->notify_guest_addr);
+	else
+		send_msg(dev->fifo_guest_addr, &hd, dev->notify_host_addr);
+}
+
 static void ringbuf_fifo_init(ringbuf_device *dev) 
 {
 	fifo fifo_indevice;
@@ -441,31 +471,40 @@ static void ringbuf_fifo_init(ringbuf_device *dev)
 			printk(KERN_INFO "gen_pool create failed!!!!!");
 			return;
 		}
+
+		if(kfifo_size(dev->fifo_host_addr) != RINGBUF_SZ) {
+			memcpy(dev->fifo_host_addr, &fifo_indevice, 
+						sizeof(fifo_indevice));
+			INIT_KFIFO(*(dev->fifo_host_addr));
+			
+			*(dev->notify_guest_addr) = 0;
+			dev->notify_guest_history = 0;
+			dev->notify_host_history = 0;
+		} else {
+			printk(KERN_INFO "somebody stole it!!!\n");
+		}
+	} else {
+		if(kfifo_size(dev->fifo_guest_addr) != RINGBUF_SZ) {
+			memcpy(dev->fifo_guest_addr, &fifo_indevice, 
+						sizeof(fifo_indevice));
+			INIT_KFIFO(*(dev->fifo_guest_addr));
+
+			*(dev->notify_host_addr) = 0;
+			dev->notify_guest_history = 0;
+			dev->notify_host_history = 0;
+		} else {
+			printk(KERN_INFO "somebody stole it!!!\n");
+		}
 	}
 
-	if(kfifo_size(dev->fifo_host_addr) != RINGBUF_SZ) {
-		memcpy(dev->fifo_host_addr, &fifo_indevice, 
-					sizeof(fifo_indevice));
-		INIT_KFIFO(*(dev->fifo_host_addr));
-		
-		*(dev->notify_guest_addr) = 0;
-	}
-
-	if(kfifo_size(dev->fifo_guest_addr) != RINGBUF_SZ) {
-		memcpy(dev->fifo_guest_addr, &fifo_indevice, 
-					sizeof(fifo_indevice));
-		INIT_KFIFO(*(dev->fifo_guest_addr));
-
-		*(dev->notify_host_addr) = 0;
-	}
-	
-	tasklet_init(&dev->recv_msg_tasklet, recv_msg, (long)dev);
-	poll_workqueue = create_workqueue("poll_workqueue");
-	queue_work(poll_workqueue, &poll_work);
-
+	register_msg_handler(msg_type_conn, handle_msg_type_conn);
 	register_msg_handler(msg_type_req, handle_msg_type_req);
 	register_msg_handler(msg_type_add, handle_msg_type_add);
 	register_msg_handler(msg_type_free, handle_msg_type_free);
+
+	tasklet_init(&dev->recv_msg_tasklet, recv_msg, (long)dev);
+	poll_workqueue = create_workqueue("poll_workqueue");
+	queue_work(poll_workqueue, &poll_work);
 }
 
 static int ringbuf_open(struct inode * inode, struct file * filp)
@@ -494,11 +533,11 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	struct ringbuf_device *dev = kmalloc(sizeof(ringbuf_device), GFP_KERNEL);
 	
 	for(i = 0; i < PORT_NUM_MAX; i++)
-		if(ringbuf_ports[i].device)
-			continue;
+		if(!ringbuf_ports[i].device)
+			break;
 	ringbuf_ports[i].device = dev;
 
-	printk(KERN_INFO "probing for device: %s\n", (pci_name(pdev)));
+	printk(KERN_INFO "probing for device: %s@%d\n", (pci_name(pdev)), i);
 
 	ret = pci_enable_device(pdev);
 	if (ret < 0) {
@@ -524,7 +563,13 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 	dev->bar2_size = pci_resource_len(pdev, 2);
 
 	dev->dev = pdev;
-	dev->role = ROLE;
+	if(((int)pci_name(pdev)[9] - 48) % 2){
+		dev->role = Host;
+		printk(KERN_INFO "I'm a host!!!!!!!!!!!!");
+	} else {
+		dev->role = Guest;
+		printk(KERN_INFO "I'm a Guest!!!!!!!!!!!!");
+	}
 	dev->ivposition = NODEID;
 	pci_set_drvdata(pdev, dev);
 
@@ -553,6 +598,13 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 		+ 2 * sizeof(*dev->notify_guest_addr);	
 
 	ringbuf_fifo_init(dev);
+	printk(KERN_INFO "Host|Guest: %d %d | %d %d\n", 
+		*(dev->notify_host_addr), dev->notify_host_history, 
+		*(dev->notify_guest_addr), dev->notify_guest_history);
+	ringbuf_connect(dev);
+	printk(KERN_INFO "Host|Guest: %d %d | %d %d\n", 
+		*(dev->notify_host_addr), dev->notify_host_history, 
+		*(dev->notify_guest_addr), dev->notify_guest_history);
 
 	printk(KERN_INFO "device probed\n");
 	return 0;

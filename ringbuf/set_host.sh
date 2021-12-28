@@ -1,1 +1,2 @@
-insmod /bin/ringbuf/w1/ringbuf_w1.ko ROLE=1 PCIID=4 DEVNAME=ringbuf_w1 NODEID=$1
+insmod /bin/ringbuf/src/ringbuf.ko NODEID=$1
+mknod /dev/ringbuf c 248 0

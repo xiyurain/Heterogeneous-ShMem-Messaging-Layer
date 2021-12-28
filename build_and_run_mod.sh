@@ -1,11 +1,7 @@
 #!/bin/bash
 
-cd ./ringbuf/r1 && cp ../src/ringbuf.c ./ringbuf_r1.c && make
-cd        ../r2 && cp ../src/ringbuf.c ./ringbuf_r2.c && make
-cd        ../w1 && cp ../src/ringbuf.c ./ringbuf_w1.c && make
-cd        ../w2 && cp ../src/ringbuf.c ./ringbuf_w2.c && make
-cd        ../test/                                    && make
-cd        ../test2/                                   && make
+cd ./ringbuf/src    && make
+cd ../test/         && make
 
 cd ../../fs/
 
@@ -17,24 +13,28 @@ cp -rp ../ringbuf/ rootfs/bin
 umount rootfs
 rm -r ./rootfs/
 cp rfs.img rfs2.img
-cp rfs.img rfs3.img
+# cp rfs.img rfs3.img
 # cp rfs.img rfs4.img
 
 nohup qemu-system-x86_64 -m 1024M \
     -drive format=raw,file=rfs.img \
     -kernel ../images/bzImage \
     -append "root=/dev/sda init=/bin/ash" \
+    -chardev socket,path=/tmp/ivshmem_socket-10,id=fg-doorbell-10 \
     -chardev socket,path=/tmp/ivshmem_socket-01,id=fg-doorbell-01 \
+    -device ivshmem-doorbell,chardev=fg-doorbell-10,vectors=4 \
     -device ivshmem-doorbell,chardev=fg-doorbell-01,vectors=4 \
     > qemu.log 2>&1 &
 
-# nohup qemu-system-x86_64 -m 1024M \
-#     -drive format=raw,file=rfs2.img \
-#     -kernel ../images/bzImage \
-#     -append "root=/dev/sda init=/bin/ash" \
-#     -chardev socket,path=/tmp/ivshmem_socket-01,id=fg-doorbell-01 \
-#     -device ivshmem-doorbell,chardev=fg-doorbell-01,vectors=4 \
-#     > qemu.log2 2>&1 &
+nohup qemu-system-x86_64 -m 1024M \
+    -drive format=raw,file=rfs2.img \
+    -kernel ../images/bzImage \
+    -append "root=/dev/sda init=/bin/ash" \
+    -chardev socket,path=/tmp/ivshmem_socket-01,id=fg-doorbell-01 \
+    -chardev socket,path=/tmp/ivshmem_socket-10,id=fg-doorbell-10 \
+    -device ivshmem-doorbell,chardev=fg-doorbell-01,vectors=4 \
+    -device ivshmem-doorbell,chardev=fg-doorbell-10,vectors=4 \
+    > qemu.log2 2>&1 &
 
 # gdb --args /home/qemu/build/qemu-system-x86_64 -m 1024M \
 # /home/qemu/build/qemu-system-x86_64 -m 1024M \
