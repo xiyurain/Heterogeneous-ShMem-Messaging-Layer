@@ -26,15 +26,15 @@ nohup qemu-system-x86_64 -m 1024M \
     -append "root=/dev/sda init=/bin/ash" \
     -chardev socket,path=/tmp/ivshmem_socket-01,id=fg-doorbell-01 \
     -device ivshmem-doorbell,chardev=fg-doorbell-01,vectors=4 \
-    > qemu.log1 2>&1 &
+    > qemu.log 2>&1 &
 
-nohup qemu-system-x86_64 -m 1024M \
-    -drive format=raw,file=rfs2.img \
-    -kernel ../images/bzImage \
-    -append "root=/dev/sda init=/bin/ash" \
-    -chardev socket,path=/tmp/ivshmem_socket-01,id=fg-doorbell-01 \
-    -device ivshmem-doorbell,chardev=fg-doorbell-01,vectors=4 \
-    > qemu.log2 2>&1 &
+# nohup qemu-system-x86_64 -m 1024M \
+#     -drive format=raw,file=rfs2.img \
+#     -kernel ../images/bzImage \
+#     -append "root=/dev/sda init=/bin/ash" \
+#     -chardev socket,path=/tmp/ivshmem_socket-01,id=fg-doorbell-01 \
+#     -device ivshmem-doorbell,chardev=fg-doorbell-01,vectors=4 \
+#     > qemu.log2 2>&1 &
 
 # gdb --args /home/qemu/build/qemu-system-x86_64 -m 1024M \
 # /home/qemu/build/qemu-system-x86_64 -m 1024M \
