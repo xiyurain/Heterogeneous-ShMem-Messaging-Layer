@@ -78,7 +78,7 @@ enum {
 	msg_type_conn 		=	8,
 	msg_type_disconn	=	9,
 	msg_type_kalive 	= 	10,
-	msg_type_syncback	=	11,
+	msg_type_ack		=	11,
 };
 
 /*
@@ -186,6 +186,7 @@ static void free_payload(ringbuf_device *dev, rbmsg_hd *hd);
 struct workqueue_struct *poll_workqueue;
 DECLARE_WORK(poll_work, ringbuf_poll);
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
+static struct timer_list keep_alive_timer;
 
 static msg_handler ctrl_msg_handlers[MSG_TYPE_MAX] = { NULL };
 static void register_msg_handler(port_namespace *namespace, int msg_type, msg_handler handler);
@@ -290,40 +291,40 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 	return 0;
 }
 
-static void ringbuf_poll(struct work_struct *work) {
-	int i;
-	ringbuf_device *dev;
-	printk(KERN_INFO "start polling============================\n");
-	while(TRUE) {
-		for(i=0; i < PORT_NUM_MAX; i++) {
-			if(!ringbuf_ports[i].device)
-				continue;
-			dev = ringbuf_ports[i].device;
-			switch (dev->role) {
-			case Host:
-				if(*(dev->notify_host_addr) > dev->notify_host_history) {
-					ringbuf_interrupt(dev, 25);
-					dev->notify_host_history++;
-				}
-				break;
-			case Guest:
-				if(*(dev->notify_guest_addr) > dev->notify_guest_history) {
-					ringbuf_interrupt(dev, 25);
-					dev->notify_guest_history++;
-				}
-				break;
-			default: break;
-			}
-		}
-		msleep(SLEEP_PERIOD_MSEC);
-	}
+// static void ringbuf_poll(struct work_struct *work) {
+// 	int i;
+// 	ringbuf_device *dev;
+// 	printk(KERN_INFO "start polling============================\n");
+// 	while(TRUE) {
+// 		for(i=0; i < PORT_NUM_MAX; i++) {
+// 			if(!ringbuf_ports[i].device)
+// 				continue;
+// 			dev = ringbuf_ports[i].device;
+// 			switch (dev->role) {
+// 			case Host:
+// 				if(*(dev->notify_host_addr) > dev->notify_host_history) {
+// 					ringbuf_interrupt(dev, 25);
+// 					dev->notify_host_history++;
+// 				}
+// 				break;
+// 			case Guest:
+// 				if(*(dev->notify_guest_addr) > dev->notify_guest_history) {
+// 					ringbuf_interrupt(dev, 25);
+// 					dev->notify_guest_history++;
+// 				}
+// 				break;
+// 			default: break;
+// 			}
+// 		}
+// 		msleep(SLEEP_PERIOD_MSEC);
+// 	}
 
 	
-}
+// }
 
-static inline void ringbuf_notify(void *addr) {
-	(*(unsigned int*)addr)++;
-}
+// static inline void ringbuf_notify(void *addr) {
+// 	(*(unsigned int*)addr)++;
+// }
 
 static irqreturn_t ringbuf_interrupt(ringbuf_device *dev, int irq)
 {
@@ -371,10 +372,11 @@ static int handle_msg_type_disconn(ringbuf_device *dev, rbmsg_hd *hd)
 
 static int handle_msg_type_kalive(ringbuf_device *dev, rbmsg_hd *hd) 
 {
+	/*No need to do anything, recv_msg() already sent an ACK*/
 	return 0;
 }
 
-static int handle_msg_type_syncback(ringbuf_device *dev, rbmsg_hd *hd) 
+static int handle_msg_type_ack(ringbuf_device *dev, rbmsg_hd *hd) 
 {
 	dev->sync_toggle = 0;
 	wake_up_interruptible(&wait_queue);
@@ -476,7 +478,7 @@ static void recv_msg(unsigned long data)
 {	
 	msg_handler handler = NULL;
 	rbmsg_hd hd;
-	rbmsg_hd hd_syncback;
+	rbmsg_hd hd_ack;
 	size_t ret_len;
 	ringbuf_device *dev = (ringbuf_device*)data;
 	int p;
@@ -502,11 +504,11 @@ static void recv_msg(unsigned long data)
 		return;
 	}
 	if(hd.is_sync){
-		hd_syncback.is_sync = 0;
-		hd_syncback.msg_type = msg_type_syncback;
+		hd_ack.is_sync = 0;
+		hd_ack.msg_type = msg_type_ack;
 		send_msg(dev->role == Host ? 
 			dev->fifo_host_addr : dev->fifo_guest_addr,
-			&hd_syncback, 
+			&hd_ack, 
 			dev->role == Host ? 
 			dev->notify_guest_addr : dev->notify_host_addr);
 	}
@@ -536,7 +538,7 @@ static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr)
 	return 0;
 }
 
-static unsigned int send_msg_sync(ringbuf_device *dev, fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr)
+static int send_msg_sync(ringbuf_device *dev, fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr)
 {
 	int ret;
 
@@ -544,11 +546,39 @@ static unsigned int send_msg_sync(ringbuf_device *dev, fifo *fifo_addr, rbmsg_hd
 	send_msg(fifo_addr, hd, notify_addr);
 	
 	dev->sync_toggle = 1;
-	ret = wait_event_interruptible(wait_queue, dev->sync_toggle == 0);
+	ret = wait_event_interruptible(wait_queue, dev->sync_toggle != 1);
+	if(dev->sync_toggle == 2) {
+		return -1;
+	}
 	return ret;
 }
 
-static void ringbuf_connect(ringbuf_device *dev) {
+static int keep_alive(ringbuf_device *dev) 
+{
+	rbmsg_hd hd;
+	hd.msg_type = msg_type_kalive;
+	hd.src_qid = dev->ivposition;
+
+	setup_timer(&keep_alive_timer, keepalive_timeout, (long)dev);
+	mod_timer(&keep_alive_timer, jiffies + msecs_to_jiffies(10000));
+
+	return send_msg_sync(dev->role == Host ? 
+		dev->fifo_host_addr : dev->fifo_guest_addr,
+		&hd, 
+		dev->role == Host ? 
+		dev->notify_guest_addr : dev->notify_host_addr);
+}
+
+static void keepalive_timeout(unsigned long data)
+{	
+	if(((ringbuf_device*)data)->sync_toggle == 1) {
+		(ringbuf_device*)data)->sync_toggle = 2;
+		wake_up_interruptible(&wait_queue);
+	}
+}
+
+static void ringbuf_connect(ringbuf_device *dev) 
+{
 	rbmsg_hd hd;
 	hd.msg_type = msg_type_conn;
 	hd.src_qid = dev->ivposition;
@@ -599,7 +629,7 @@ static void ringbuf_fifo_init(ringbuf_device *dev)
 	register_msg_handler(NULL, msg_type_conn, handle_msg_type_conn);
 	register_msg_handler(NULL, msg_type_disconn, handle_msg_type_disconn);
 	register_msg_handler(NULL, msg_type_kalive, handle_msg_type_kalive);
-	register_msg_handler(NULL, msg_type_syncback, handle_msg_type_syncback);
+	register_msg_handler(NULL, msg_type_ack, handle_msg_type_ack);
 
 	tasklet_init(&dev->recv_msg_tasklet, recv_msg, (long)dev);
 	poll_workqueue = create_workqueue("poll_workqueue");
