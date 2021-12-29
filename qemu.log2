@@ -1,1 +1,0 @@
-qemu-system-x86_64: -drive format=raw,file=rfs2.img: Could not open 'rfs2.img': No such file or directory
