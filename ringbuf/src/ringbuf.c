@@ -44,14 +44,16 @@ MODULE_VERSION("1.0");
 #define FALSE 0
 #define RINGBUF_DEVICE_MINOR_NR 0
 #define PORT_NUM_MAX 8
-#define MSG_TYPE_MAX 8
+#define MSG_TYPE_MAX 16
+#define MSG_CTRLTYPE_MIN 8
+#define NAMESPACE_NUM_MAX 4
 #define QEMU_PROCESS_ID 1
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define SLEEP_PERIOD_MSEC 10
 #define DEVNAME "ringbuf"
 
 #define IOCTL_MAGIC		('f')
-#define IOCTL_RING		_IOW(IOCTL_MAGIC, 1, u32)
+#define IOCTL_REG_NAMESPACE	_IOW(IOCTL_MAGIC, 1, u32)
 #define IOCTL_REQ		_IO(IOCTL_MAGIC, 2)
 #define IOCTL_IVPOSITION	_IOR(IOCTL_MAGIC, 3, u32)
 #define IVPOSITION_REG_OFF	0x08
@@ -68,11 +70,15 @@ enum {
 };
 
 enum {
-	msg_type_req 	=	1,
-	msg_type_add	=	2,
-	msg_type_free	=	3,
-	msg_type_conn 	=	4,
-	msg_type_kalive = 	5,
+	/* message type*/
+	msg_type_req 		=	1,
+	msg_type_add		=	2,
+	msg_type_free		=	3,
+	/* control message types*/
+	msg_type_conn 		=	8,
+	msg_type_disconn	=	9,
+	msg_type_kalive 	= 	10,
+	msg_type_syncback	=	11,
 };
 
 /*
@@ -82,6 +88,9 @@ typedef struct ringbuf_msg_hd {
 
 	unsigned int src_qid;
 	unsigned int msg_type;
+	unsigned int is_sync;
+
+	char namespace[64];
 
 	unsigned int payload_off;
 	ssize_t payload_len;
@@ -129,12 +138,22 @@ typedef struct ringbuf_device {
 	unsigned int 		notify_host_history;
 
 	struct tasklet_struct	recv_msg_tasklet;
+	unsigned int 		sync_toggle;
 	
 	unsigned int 		role;
 	void __iomem		*payload_area;
 	struct gen_pool		*payload_pool;
 
 } ringbuf_device;
+
+typedef int (*msg_handler)(ringbuf_device *dev, rbmsg_hd *);
+
+typedef struct port_namespace
+{
+	char name[64];
+	msg_handler msg_handlers[MSG_TYPE_MAX];
+} port_namespace;
+
 
 typedef struct ringbuf_port
 {
@@ -166,11 +185,11 @@ static void free_payload(ringbuf_device *dev, rbmsg_hd *hd);
 
 struct workqueue_struct *poll_workqueue;
 DECLARE_WORK(poll_work, ringbuf_poll);
+DECLARE_WAIT_QUEUE_HEAD(wait_queue);
 
-typedef int (*msg_handler)(ringbuf_device *dev, rbmsg_hd *);
-static msg_handler msg_handlers[16] = { NULL };
-static void register_msg_handler(int msg_type, msg_handler handler);
-static void unregister_msg_handler(int msg_type);
+static msg_handler ctrl_msg_handlers[MSG_TYPE_MAX] = { NULL };
+static void register_msg_handler(port_namespace *namespace, int msg_type, msg_handler handler);
+static void unregister_msg_handler(port_namespace *namespace, int msg_type);
 
 static int handle_msg_type_conn(ringbuf_device *dev, rbmsg_hd *hd);
 static int handle_msg_type_req(ringbuf_device *dev, rbmsg_hd *hd);
@@ -178,6 +197,7 @@ static int handle_msg_type_add(ringbuf_device *dev, rbmsg_hd *hd);
 static int handle_msg_type_free(ringbuf_device *dev, rbmsg_hd *hd);
 
 static ringbuf_port ringbuf_ports[PORT_NUM_MAX];
+static port_namespace port_namespaces[NAMESPACE_NUM_MAX];
 
 static int device_major_nr;
 extern unsigned long volatile jiffies;
@@ -210,10 +230,17 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 	unsigned int req_id;
 	unsigned int req_address;
 	rbmsg_hd hd;
-	int i;
+	int i, p;
 
     	switch (cmd) {
-    	case IOCTL_RING:
+    	case IOCTL_REG_NAMESPACE:
+		for(p = 0; p < NAMESPACE_NUM_MAX; p++) {
+			if(port_namespaces[p].name)
+				continue;
+			memcpy(port_namespaces + p, (port_namespace*)value, 
+					sizeof(port_namespace));
+			break;
+		}
         	break;
 
 	case IOCTL_REQ:
@@ -230,7 +257,6 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 				break;
 			}
 		}
-		// printk(KERN_INFO "22222222\n");
 		if(!dev) {
 			printk(KERN_INFO "unknown request src!!!\n");
 			return -1;
@@ -247,7 +273,8 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 		hd.src_qid = dev->ivposition;
 		hd.payload_off = req_address;
 		hd.payload_len = 0;
-		// printk(KERN_INFO "3333333333333\n");
+		hd.is_sync = 0;
+		memcpy(hd.namespace, "demo_namespace", 15);
 		send_msg(dev->fifo_guest_addr, &hd, dev->notify_host_addr);
 		break;
 
@@ -327,6 +354,33 @@ static int handle_msg_type_conn(ringbuf_device *dev, rbmsg_hd *hd) {
 	return -1;
 }
 
+static int handle_msg_type_disconn(ringbuf_device *dev, rbmsg_hd *hd) 
+{
+	int i;
+
+	printk(KERN_INFO "got conn: %d\n", hd->src_qid);
+	for(i = 0; i < PORT_NUM_MAX; i++) {
+		if(ringbuf_ports[i].device == dev) {
+			ringbuf_ports[i].src_id = 0;
+			printk(KERN_INFO "set %d to %d\n", i, hd->src_qid);
+			return 0;
+		}
+	}
+	return -1;
+}
+
+static int handle_msg_type_kalive(ringbuf_device *dev, rbmsg_hd *hd) 
+{
+	return 0;
+}
+
+static int handle_msg_type_syncback(ringbuf_device *dev, rbmsg_hd *hd) 
+{
+	dev->sync_toggle = 0;
+	wake_up_interruptible(&wait_queue);
+	return 0;
+}
+			
 static int handle_msg_type_req(ringbuf_device *dev, rbmsg_hd *hd) 
 {
 	fifo* fifo_addr = dev->fifo_host_addr;
@@ -334,7 +388,6 @@ static int handle_msg_type_req(ringbuf_device *dev, rbmsg_hd *hd)
 	char buffer[256];
 	size_t len;
 
-	// printk(KERN_INFO "6666666666666666\n");
 	sprintf(buffer, "msg dst_id=%d src_id=%d - (jiffies: %lu)",
 			hd->src_qid, dev->ivposition, jiffies);
 	len = strlen(buffer) + 1;
@@ -343,10 +396,11 @@ static int handle_msg_type_req(ringbuf_device *dev, rbmsg_hd *hd)
 	new_hd.msg_type = msg_type_add;
 	new_hd.payload_off = add_payload(dev, len);
 	new_hd.payload_len = len;
+	new_hd.is_sync = 0;
+	memcpy(new_hd.namespace, hd->namespace, strlen(hd->namespace));
 
 	memcpy(dev->payload_area + new_hd.payload_off, buffer, len);
 	wmb();
-	// printk(KERN_INFO "77777777777777777\n");
 	send_msg(fifo_addr, &new_hd, dev->notify_guest_addr);
 
 	return 0;
@@ -375,20 +429,28 @@ static int handle_msg_type_free(ringbuf_device *dev, rbmsg_hd *hd)
 	return 0;
 }
 
-static void register_msg_handler(int msg_type, msg_handler handler)
+static void register_msg_handler(port_namespace *namespace, int msg_type, msg_handler handler)
 {	
 	if(handler == NULL || msg_type > MSG_TYPE_MAX || msg_type <= 0) {
 		return;
 	}
-	msg_handlers[msg_type] = handler;
+	if(msg_type < MSG_CTRLTYPE_MIN) {
+		namespace->msg_handlers[msg_type] = handler;
+	} else {
+		ctrl_msg_handlers[msg_type] = handler;
+	}
 }
 
-static void unregister_msg_handler(int msg_type)
+static void unregister_msg_handler(port_namespace *namespace, int msg_type)
 {
 	if(msg_type > MSG_TYPE_MAX || msg_type <= 0) {
 		return;
 	}
-	msg_handlers[msg_type] = NULL;
+	if(msg_type < MSG_CTRLTYPE_MIN) {
+		namespace->msg_handlers[msg_type] = NULL;
+	} else {
+		ctrl_msg_handlers[msg_type] = NULL;
+	}
 }
 
 static unsigned long add_payload(ringbuf_device *dev, size_t len) 
@@ -414,8 +476,10 @@ static void recv_msg(unsigned long data)
 {	
 	msg_handler handler = NULL;
 	rbmsg_hd hd;
+	rbmsg_hd hd_syncback;
 	size_t ret_len;
 	ringbuf_device *dev = (ringbuf_device*)data;
+	int p;
 
 	fifo *fifo_addr;
 	if(dev->role == Host) {
@@ -436,10 +500,27 @@ static void recv_msg(unsigned long data)
 	if(!hd.src_qid) {
 		printk(KERN_ERR "invalid ring buffer msg\n");
 		return;
-	} else {
-		handler = msg_handlers[hd.msg_type];
-		handler(dev, &hd);
 	}
+	if(hd.is_sync){
+		hd_syncback.is_sync = 0;
+		hd_syncback.msg_type = msg_type_syncback;
+		send_msg(dev->role == Host ? 
+			dev->fifo_host_addr : dev->fifo_guest_addr,
+			&hd_syncback, 
+			dev->role == Host ? 
+			dev->notify_guest_addr : dev->notify_host_addr);
+	}
+	if(hd.msg_type < MSG_CTRLTYPE_MIN){
+		for(p = 0; p < NAMESPACE_NUM_MAX; p++)
+			if(port_namespaces[p].name == hd.namespace) {
+				handler = port_namespaces[p].msg_handlers[hd.msg_type];
+				break;	
+			}
+	} else {
+		handler = ctrl_msg_handlers[hd.msg_type];
+	}
+	handler(dev, &hd);
+	return;
 }
 
 static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr) 
@@ -448,13 +529,23 @@ static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr)
 		printk(KERN_ERR "not enough space in ring buffer\n");
 		return -1;
 	}
-	// printk(KERN_INFO "4444444444444444\n");
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 	rmb();
 	kfifo_in(fifo_addr, (char*)hd, MSG_SZ);
-	// printk(KERN_INFO "5555555555555555\n");
 	ringbuf_notify(notify_addr);
 	return 0;
+}
+
+static unsigned int send_msg_sync(ringbuf_device *dev, fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr)
+{
+	int ret;
+
+	hd->is_sync = 1;
+	send_msg(fifo_addr, hd, notify_addr);
+	
+	dev->sync_toggle = 1;
+	ret = wait_event_interruptible(wait_queue, dev->sync_toggle == 0);
+	return ret;
 }
 
 static void ringbuf_connect(ringbuf_device *dev) {
@@ -505,10 +596,10 @@ static void ringbuf_fifo_init(ringbuf_device *dev)
 		}
 	}
 
-	register_msg_handler(msg_type_conn, handle_msg_type_conn);
-	register_msg_handler(msg_type_req, handle_msg_type_req);
-	register_msg_handler(msg_type_add, handle_msg_type_add);
-	register_msg_handler(msg_type_free, handle_msg_type_free);
+	register_msg_handler(NULL, msg_type_conn, handle_msg_type_conn);
+	register_msg_handler(NULL, msg_type_disconn, handle_msg_type_disconn);
+	register_msg_handler(NULL, msg_type_kalive, handle_msg_type_kalive);
+	register_msg_handler(NULL, msg_type_syncback, handle_msg_type_syncback);
 
 	tasklet_init(&dev->recv_msg_tasklet, recv_msg, (long)dev);
 	poll_workqueue = create_workqueue("poll_workqueue");
@@ -524,7 +615,14 @@ static int ringbuf_open(struct inode * inode, struct file * filp)
 				RINGBUF_DEVICE_MINOR_NR);
 		return -ENODEV;
 	}
-   return 0;
+
+	port_namespace namespace;
+	memcpy(namespace.name, "demo_namespace", 15);
+	register_msg_handler(&namespace, msg_type_req, handle_msg_type_req);
+	register_msg_handler(&namespace, msg_type_add, handle_msg_type_add);
+	register_msg_handler(&namespace, msg_type_free, handle_msg_type_free);
+	ringbuf_ioctl(NULL, IOCTL_REG_NAMESPACE, (long)&namespace);
+   	return 0;
 }
 
 static int ringbuf_release(struct inode * inode, struct file * filp)
@@ -650,9 +748,6 @@ static void ringbuf_remove_device(struct pci_dev* pdev)
 static void __exit ringbuf_cleanup(void)
 {
 	destroy_workqueue(poll_workqueue);
-	unregister_msg_handler(msg_type_req);
-	unregister_msg_handler(msg_type_add);
-	unregister_msg_handler(msg_type_free);
 
 	pci_unregister_driver(&ringbuf_pci_driver);
 	unregister_chrdev(device_major_nr, DEVNAME);

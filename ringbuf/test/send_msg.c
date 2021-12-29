@@ -37,7 +37,6 @@ static void write_msg(struct work_struct *work)
         msleep(10000);
         printk(KERN_INFO "send_message test case start.\n");
         for(i = 0; i < cyc; i++) {
-                // printk(KERN_INFO "11111111\n");
                 fp->f_op->unlocked_ioctl(fp, IOCTL_REQ, value);
                 msleep(2000);
         }

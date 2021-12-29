@@ -1,10 +1,11 @@
 #!/bin/bash
 
-cd ./ringbuf/src    && make
-cd ../test/         && make
+# cd ./ringbuf/src    && make
+# cd ../test/         && make
 
-cd ../../fs/
+# cd ../../
 
+cd ./fs/
 rm -r ./rootfs/
 mkdir ./rootfs
 mount -o loop rfs.img ./rootfs
