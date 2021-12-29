@@ -217,7 +217,11 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
         	break;
 
 	case IOCTL_REQ:
-		req_id = (value >> 32) & 0xFFFFFFFF;
+		req_id = (value >> 16) & 0xFFFF;
+		if(req_id <= 0) {
+			printk(KERN_INFO "req_id must be >0!!\n");
+			return -1;
+		}
 		dev = NULL;
 		for(i = 0; i < PORT_NUM_MAX; i++) {
 			port = &ringbuf_ports[i];
@@ -226,6 +230,7 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 				break;
 			}
 		}
+		// printk(KERN_INFO "22222222\n");
 		if(!dev) {
 			printk(KERN_INFO "unknown request src!!!\n");
 			return -1;
@@ -242,7 +247,7 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 		hd.src_qid = dev->ivposition;
 		hd.payload_off = req_address;
 		hd.payload_len = 0;
-
+		// printk(KERN_INFO "3333333333333\n");
 		send_msg(dev->fifo_guest_addr, &hd, dev->notify_host_addr);
 		break;
 
@@ -313,9 +318,11 @@ static int handle_msg_type_conn(ringbuf_device *dev, rbmsg_hd *hd) {
 
 	printk(KERN_INFO "got conn: %d\n", hd->src_qid);
 	for(i = 0; i < PORT_NUM_MAX; i++) {
-		if(ringbuf_ports[i].device == dev)
+		if(ringbuf_ports[i].device == dev) {
 			ringbuf_ports[i].src_id = hd->src_qid;
-		return 0;
+			printk(KERN_INFO "set %d to %d\n", i, hd->src_qid);
+			return 0;
+		}
 	}
 	return -1;
 }
@@ -327,6 +334,7 @@ static int handle_msg_type_req(ringbuf_device *dev, rbmsg_hd *hd)
 	char buffer[256];
 	size_t len;
 
+	// printk(KERN_INFO "6666666666666666\n");
 	sprintf(buffer, "msg dst_id=%d src_id=%d - (jiffies: %lu)",
 			hd->src_qid, dev->ivposition, jiffies);
 	len = strlen(buffer) + 1;
@@ -338,7 +346,7 @@ static int handle_msg_type_req(ringbuf_device *dev, rbmsg_hd *hd)
 
 	memcpy(dev->payload_area + new_hd.payload_off, buffer, len);
 	wmb();
-
+	// printk(KERN_INFO "77777777777777777\n");
 	send_msg(fifo_addr, &new_hd, dev->notify_guest_addr);
 
 	return 0;
@@ -440,11 +448,11 @@ static unsigned int send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr)
 		printk(KERN_ERR "not enough space in ring buffer\n");
 		return -1;
 	}
-
+	// printk(KERN_INFO "4444444444444444\n");
 	fifo_addr->kfifo.data = (void*)fifo_addr + 0x18;
 	rmb();
 	kfifo_in(fifo_addr, (char*)hd, MSG_SZ);
-
+	// printk(KERN_INFO "5555555555555555\n");
 	ringbuf_notify(notify_addr);
 	return 0;
 }
