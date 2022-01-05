@@ -59,7 +59,7 @@ MODULE_VERSION("1.0");
 #define IVPOSITION_REG_OFF	0x08
 #define DOORBELL_REG_OFF	0x0c
 
-static int NODEID = 3;
+static int NODEID = 0;
 MODULE_PARM_DESC(NODEID, "Node ID of the shmem QEMU.");
 module_param(NODEID, int, 0400);
 
@@ -104,6 +104,11 @@ typedef struct ringbuf_msg_hd {
 
 typedef STRUCT_KFIFO(char, RINGBUF_SZ) fifo;
 
+/*
+ * @ioaddr: physical address of IVshmem IO space
+ * @fifo_host_addr: address of the Kfifo struct
+ * @payload_area: start address of the payloads area
+ */
 typedef ringbuf_fifo {
 	fifo*			fifo_host_addr;
 	fifo*			fifo_guest_addr;
@@ -114,7 +119,6 @@ typedef ringbuf_fifo {
 
 typedef struct ringbuf_socket {
 	char 			name[64];
-	int 			socket_num;
 	int 			in_which_namespace;
 
 	ringbuf_fifo 		*fifo;
@@ -126,9 +130,6 @@ typedef struct ringbuf_socket {
 /*
  * @base_addr: mapped start address of IVshmem space
  * @regaddr: physical address of shmem PCIe dev regs
- * @ioaddr: physical address of IVshmem IO space
- * @fifo_host_addr: address of the Kfifo struct
- * @payload_area: start address of the payloads area
 */
 typedef struct ringbuf_device {
 	struct pci_dev		*dev;
@@ -144,68 +145,79 @@ typedef struct ringbuf_device {
 	unsigned int 		bar2_addr;
 	unsigned int 		bar2_size;
 
-	ringbuf_fifo 		syswide_fifo;
-	unsigned int 		notify_guest_history;
-	unsigned int 		notify_host_history;
-	
-	unsigned int 		role;
-	void __iomem		*payload_area;
-	struct gen_pool		*payload_pool;
 } ringbuf_device;
 
-typedef int (*msg_handler)(ringbuf_device *dev, rbmsg_hd *);
+typedef int (*msg_handler)(ringbuf_device *dev, rbmsg_hd *hd);
 
 typedef struct port_namespace {
-	int namespace_number;
-	msg_handler msg_handlers[MSG_TYPE_MAX];
+	int 			namespace_number;
+	char 			namespace_name[64];
+	msg_handler 		msg_handlers[MSG_TYPE_MAX];
 } port_namespace;
 
 typedef struct ringbuf_port {
-	ringbuf_device *device;
-	unsigned int remote_node_id;
-	port_namespace namespaces[NAMESPACE_NUM_MAX];
+	ringbuf_device 		*device;
+	unsigned int 		remote_node_id;
+	unsigned int 		role;
+
+	ringbuf_socket		syswide_socket;
+	void __iomem		*payload_area;
+	struct gen_pool		*payload_pool;
+
+	port_namespace 		namespaces[NAMESPACE_NUM_MAX];
 } ringbuf_port;
 
-static int __init ringbuf_init(void);
-static void __exit ringbuf_cleanup(void);
+static ringbuf_port ringbuf_ports[PORT_NUM_MAX];
+static int device_major_nr;
+extern unsigned long volatile jiffies;
 
-static int ringbuf_open(struct inode *, struct file *);
-static int ringbuf_release(struct inode *, struct file *);
-static void ringbuf_remove_device(struct pci_dev* pdev);
-static int ringbuf_probe_device(struct pci_dev *pdev,
-				const struct pci_device_id * ent);
 
-static long ringbuf_ioctl(struct file *fp, unsigned int cmd, 
-					long unsigned int value);
-static void ringbuf_poll(struct work_struct *work);
-static void ringbuf_notify(void *addr);
-static irqreturn_t ringbuf_interrupt(ringbuf_device *dev, int irq);
-
-static void ringbuf_connect(ringbuf_device *dev);
-static void recv_msg(unsigned long data);
+/*API directly on the PCIE fifo*/
 static int pcie_recv_msg(fifo *fifo_addr, rbmsg_hd *hd);
 static int pcie_send_msg(fifo *fifo_addr, rbmsg_hd* hd, void *notify_addr);
-static unsigned long add_payload(ringbuf_device *dev, size_t len);
-static void free_payload(ringbuf_device *dev, rbmsg_hd *hd);
+static unsigned long pcie_add_payload(ringbuf_device *dev, size_t len);
+static void pcie_free_payload(ringbuf_device *dev, rbmsg_hd *hd);
 
+/*API of the ringbuf socket*/
+static void socket_listen(ringbuf_socket *socket);
+static void socket_connect(ringbuf_socket *socket);
+static void socket_send(ringbuf_socket *socket, rbmsg_hd *hd);
+static void socket_receive(ringbuf_socket *scoket, rbmsg_hd *hd);
+static void socket_disconnect(ringbuf_socket *socket);
+static void socket_poll(struct work_struct *work);
+static void socket_notify(void *addr);
+
+/*API of the ringbuf port*/
+static unsigned long port_create_socket(
+	ringbuf_device *dev, int namespace_number, char *socket_name);
+static void port_register_msg_handler(
+	port_namespace *namespace, int msg_type, msg_handler handler);
+static void port_unregister_msg_handler(
+	port_namespace *namespace, int msg_type);
+static int ringbuf_probe_device(
+	struct pci_dev *pdev, const struct pci_device_id * ent);
+static void ringbuf_remove_device(struct pci_dev* pdev);
+
+/*API of the ringbuf device driver*/
+static int __init ringbuf_init(void);
+static void __exit ringbuf_cleanup(void);
+static int ringbuf_open(struct inode *, struct file *);
+static int ringbuf_release(struct inode *, struct file *);
+static long ringbuf_ioctl(struct file *fp, unsigned int cmd, 
+					long unsigned int value);
+static irqreturn_t ringbuf_interrupt(ringbuf_device *dev, int irq);
+
+/*message handlers*/
+static int handle_sys_conn(ringbuf_device *dev, rbmsg_hd *hd);
+static int handle_sys_req(ringbuf_device *dev, rbmsg_hd *hd);
+static int handle_sys_add(ringbuf_device *dev, rbmsg_hd *hd);
+static int handle_sys_free(ringbuf_device *dev, rbmsg_hd *hd);
+
+/*other global variables*/
 struct workqueue_struct *poll_workqueue;
 DECLARE_WORK(poll_work, ringbuf_poll);
 DECLARE_WAIT_QUEUE_HEAD(wait_queue);
 static struct timer_list keep_alive_timer;
-
-static msg_handler ctrl_msg_handlers[MSG_TYPE_MAX] = { NULL };
-static void register_msg_handler(port_namespace *namespace, int msg_type, msg_handler handler);
-static void unregister_msg_handler(port_namespace *namespace, int msg_type);
-
-static int handle_msg_type_conn(ringbuf_device *dev, rbmsg_hd *hd);
-static int handle_msg_type_req(ringbuf_device *dev, rbmsg_hd *hd);
-static int handle_msg_type_add(ringbuf_device *dev, rbmsg_hd *hd);
-static int handle_msg_type_free(ringbuf_device *dev, rbmsg_hd *hd);
-
-static ringbuf_port ringbuf_ports[PORT_NUM_MAX];
-
-static int device_major_nr;
-extern unsigned long volatile jiffies;
 
 static const struct file_operations ringbuf_ops = {
 	.owner		= 	THIS_MODULE,
@@ -218,7 +230,6 @@ static struct pci_device_id ringbuf_id_table[] = {
 	{ 0x1af4, 0x1110, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0 },
 	{ 0 },
 };
-MODULE_DEVICE_TABLE(pci, ringbuf_id_table);
 
 static struct pci_driver ringbuf_pci_driver = {
 	.name		= 	"RINGBUF",
@@ -227,7 +238,15 @@ static struct pci_driver ringbuf_pci_driver = {
 	.remove	  	= 	ringbuf_remove_device,
 };
 
+MODULE_DEVICE_TABLE(pci, ringbuf_id_table);
+module_init(ringbuf_init);
+module_exit(ringbuf_cleanup);
 
+
+
+/* ================================================================================================
+ * Definition of the functions
+ */
 static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value)
 {
 	ringbuf_device *dev;
@@ -295,7 +314,8 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 	return 0;
 }
 
-static void ringbuf_poll(struct work_struct *work) {
+static void ringbuf_poll(struct work_struct *work) 
+{
 	int i;
 	ringbuf_device *dev;
 	printk(KERN_INFO "start polling============================\n");
@@ -324,7 +344,8 @@ static void ringbuf_poll(struct work_struct *work) {
 	}
 }
 
-static inline void ringbuf_notify(void *addr) {
+static inline void ringbuf_notify(void *addr) 
+{
 	(*(unsigned int*)addr)++;
 }
 
@@ -702,9 +723,6 @@ error:
 	unregister_chrdev(device_major_nr, DEVNAME);
 	return err;
 }
-
-module_init(ringbuf_init);
-module_exit(ringbuf_cleanup);
 
 
 static int handle_msg_type_conn(ringbuf_device *dev, rbmsg_hd *hd) {
