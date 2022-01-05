@@ -124,7 +124,12 @@ typedef struct ringbuf_socket {
 	ringbuf_fifo 		*fifo;
 	unsigned int 		notify_guest_history;
 	unsigned int 		notify_host_history;
+	int			sync_toggle;
+
+	struct workqueue_struct *poll_workqueue;
+	struct tasklet_struct	listen_work;
 	struct tasklet_struct	recv_msg_tasklet;
+	static struct timer_list keep_alive_timer;
 } ringbuf_socket;
 
 /*
@@ -168,8 +173,6 @@ typedef struct ringbuf_port {
 } ringbuf_port;
 
 static ringbuf_port ringbuf_ports[PORT_NUM_MAX];
-static int device_major_nr;
-extern unsigned long volatile jiffies;
 
 
 /*API directly on the PCIE fifo*/
@@ -181,7 +184,8 @@ static void pcie_free_payload(ringbuf_device *dev, rbmsg_hd *hd);
 /*API of the ringbuf socket*/
 static void socket_listen(ringbuf_socket *socket);
 static void socket_connect(ringbuf_socket *socket);
-static void socket_send(ringbuf_socket *socket, rbmsg_hd *hd);
+static void socket_send_sync(ringbuf_socket *socket, rbmsg_hd *hd);
+static void socket_send_async(ringbuf_socket *socket, rbmsg_hd *hd);
 static void socket_receive(ringbuf_socket *scoket, rbmsg_hd *hd);
 static void socket_disconnect(ringbuf_socket *socket);
 static void socket_poll(struct work_struct *work);
@@ -214,10 +218,8 @@ static int handle_sys_add(ringbuf_device *dev, rbmsg_hd *hd);
 static int handle_sys_free(ringbuf_device *dev, rbmsg_hd *hd);
 
 /*other global variables*/
-struct workqueue_struct *poll_workqueue;
-DECLARE_WORK(poll_work, ringbuf_poll);
-DECLARE_WAIT_QUEUE_HEAD(wait_queue);
-static struct timer_list keep_alive_timer;
+static int device_major_nr;
+extern unsigned long volatile jiffies;
 
 static const struct file_operations ringbuf_ops = {
 	.owner		= 	THIS_MODULE,
@@ -241,7 +243,6 @@ static struct pci_driver ringbuf_pci_driver = {
 MODULE_DEVICE_TABLE(pci, ringbuf_id_table);
 module_init(ringbuf_init);
 module_exit(ringbuf_cleanup);
-
 
 
 /* ================================================================================================
