@@ -54,7 +54,7 @@ MODULE_VERSION("1.0");
 #define DEVNAME "ringbuf"
 
 #define IOCTL_MAGIC		('f')
-#define IOCTL_REG_NAMESPACE	_IOW(IOCTL_MAGIC, 1, u32)
+#define IOCTL_SOCKET		_IOW(IOCTL_MAGIC, 1, u32)
 #define IOCTL_REQ		_IO(IOCTL_MAGIC, 2)
 #define IOCTL_IVPOSITION	_IOR(IOCTL_MAGIC, 3, u32)
 #define IVPOSITION_REG_OFF	0x08
@@ -228,7 +228,7 @@ static int ringbuf_probe_device(
 	struct pci_dev *pdev, const struct pci_device_id * ent);
 static void ringbuf_remove_device(struct pci_dev* pdev);
 
-/*message handlers*/
+/* message handlers: sys namespace */
 static int handle_sys_conn(ringbuf_socket *socket, rbmsg_hd *hd);
 static int handle_sys_accept(ringbuf_socket *socket, rbmsg_hd *hd);
 static int handle_sys_kalive(ringbuf_socket *socket, rbmsg_hd *hd);
@@ -267,7 +267,7 @@ module_exit(ringbuf_cleanup);
 
 
 /* ================================================================================================
- * Definition of the functions
+ * Definitions of the functions
  */
 static int pcie_poll(pcie_port *port) 
 {
@@ -618,13 +618,17 @@ static void endpoint_free_payload(ringbuf_endpoint *ep, rbmsg_hd *hd) {
 	// printk(KERN_INFO "free payload memory at offset: %lu\n", node->offset);
 }
 
-/*================================================================================================*/
-
 static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value)
 {
+	int remote_id;
+	ringbuf_endpoint *ep;
+
     	switch (cmd) {
-    	//case IOCTL_REG_NAMESPACE:
-	// case IOCTL_REQ:
+    	case IOCTL_SOCKET://TODO
+		// remote_id = *((int*)value);
+
+		// *(void*)value = ep-> 
+
 	case IOCTL_IVPOSITION:
 		printk(KERN_INFO "get ivposition: %d\n", NODEID);
 		return (long)NODEID;
