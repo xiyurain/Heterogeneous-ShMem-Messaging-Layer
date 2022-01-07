@@ -129,16 +129,16 @@ typedef struct pcie_port {
 } pcie_port;
 
 typedef struct ringbuf_socket {
-	char 					name[64];
-	int 					in_use;
-	int 					listening;
-	int 					namespace_index;
-	void					*belongs_endpoint;		
+	char 			name[64];
+	int 			in_use;
+	int 			listening;
+	int 			namespace_index;
+	void			*belongs_endpoint;		
 
-	pcie_port				*port_pcie;
+	pcie_port		*port_pcie;
 
-	int						sync_toggle;
-	struct timer_list 		keep_alive_timer;
+	int			sync_toggle;
+	struct timer_list 	keep_alive_timer;
 } ringbuf_socket;
 
 /*
@@ -149,7 +149,7 @@ typedef struct ringbuf_socket {
 */
 typedef struct ringbuf_device {
 	struct pci_dev		*dev;
-	u8 					revision;
+	u8 			revision;
 	unsigned int 		ivposition;
 
 	void __iomem 		*regs_addr;
@@ -175,15 +175,18 @@ typedef struct ringbuf_endpoint {
 	unsigned int 		remote_node_id;
 	unsigned int 		role;
 
-	ringbuf_socket		syswide_socket;
-	ringbuf_socket		sockets[MAX_SOCKET_NUM];
 	void __iomem		*mem_pool_area;
 	struct gen_pool		*mem_pool;
 
+	ringbuf_socket		syswide_socket;
+	struct workqueue_struct *syswide_queue;
+	struct work_struct	syswide_work;
+
+	ringbuf_socket		sockets[MAX_SOCKET_NUM];
 	namespace 		namespaces[NAMESPACE_NUM_MAX];
 } ringbuf_endpoint;
 
-static ringbuf_endpoint ringbuf_endpoints[PORT_NUM_MAX];
+static ringbuf_endpoint ringbuf_endpoints[MAX_ENDPOINT_NUM];
 
 
 /*API directly on the PCIE port*/
@@ -210,6 +213,7 @@ static void endpoint_register_msg_handler(
 	port_namespace *namespace, int msg_type, msg_handler handler);
 static void endpoint_unregister_msg_handler(
 	port_namespace *namespace, int msg_type);
+static void endpoint_syswide_poll(struct work_struct *work);
 static unsigned long endpoint_add_payload(ringbuf_port *port, size_t len);
 static void endpoint_free_payload(ringbuf_port *port, rbmsg_hd *hd);
 
@@ -220,7 +224,6 @@ static int ringbuf_open(struct inode *, struct file *);
 static int ringbuf_release(struct inode *, struct file *);
 static long ringbuf_ioctl(struct file *fp, unsigned int cmd, 
 					long unsigned int value);
-static irqreturn_t ringbuf_interrupt(ringbuf_device *dev, int irq);
 static int ringbuf_probe_device(
 	struct pci_dev *pdev, const struct pci_device_id * ent);
 static void ringbuf_remove_device(struct pci_dev* pdev);
@@ -319,7 +322,9 @@ static int pcie_send_msg(pcie_port *port, rbmsg_hd *hd)
 }
 
 static void socket_bind(ringbuf_socket *socket, unsigned long buffer_addr, 
-								int role) {
+								int role) 
+{
+	fifo fifo_st;
 	struct pcie_buffer *buffer = (struct pcie_buffer*)buffer_addr;
 	pcie_port *port = kmalloc(sizeof(pcie_port), GFP_KERNEL);
 	port->buffer_addr = buffer;
@@ -327,8 +332,15 @@ static void socket_bind(ringbuf_socket *socket, unsigned long buffer_addr,
 	if(role == Host) {
 		port->fifo_send = &buffer->fifo_host2guest;
 		port->fifo_recv = &buffer->fifo_guest2host;
+		memcpy(&buffer->fifo_host2guest, &fifo_st, sizeof(fifo_st));
+		memcpy(&buffer->fifo_guest2host, &fifo_st, sizeof(fifo_st));
+		INIT_KFIFO(buffer->fifo_host2guest);
+		INIT_KFIFO(buffer->fifo_guest2host);
+		
 		port->notify_remote = &buffer->notify_guest;
 		port->be_notified = &buffer->notify_host;
+		*port->notified_remote = 0;
+		*port->be_notified = 0;
 		port->notified_history = 0;
 	} else {
 		port->fifo_send = &buffer->fifo_guest2host;
@@ -341,11 +353,13 @@ static void socket_bind(ringbuf_socket *socket, unsigned long buffer_addr,
 	socket->port_pcie = port;
 }
 
-static void socket_listen(ringbuf_socket *socket) {
+static void socket_listen(ringbuf_socket *socket) 
+{
 	socket->listening = TRUE;
 }
 
-static void socket_accept(ringbuf_socket *socket, rbmsg_hd *hd) {
+static void socket_accept(ringbuf_socket *socket, rbmsg_hd *hd) 
+{
 	hd->is_sync = TRUE;
 	hd->msg_type = msg_type_accept;
 	hd->payload_off = socket->port_pcie.buffer_addr - ep->device.base_addr;
@@ -354,7 +368,8 @@ static void socket_accept(ringbuf_socket *socket, rbmsg_hd *hd) {
 	socket->listening = FALSE;
 }
 
-static void socket_connect(ringbuf_socket *socket) {
+static void socket_connect(ringbuf_socket *socket) 
+{
 	rbmsg_hd hd;
 	
 	hd.msg_type = msg_type_conn;
@@ -366,7 +381,8 @@ static void socket_connect(ringbuf_socket *socket) {
 	socket_send_async(sys_socket->port_pcie, &hd);	
 }
 
-static void socket_send_sync(ringbuf_socket *socket, rbmsg_hd *hd) {
+static void socket_send_sync(ringbuf_socket *socket, rbmsg_hd *hd) 
+{
 	hd->is_sync = TRUE;
 	pcie_send_msg(socket->port_pcie, hd);
 	
@@ -377,11 +393,13 @@ static void socket_send_sync(ringbuf_socket *socket, rbmsg_hd *hd) {
 	}
 }
 
-static void socket_send_async(ringbuf_socket *socket, rbmsg_hd *hd) {
+static void socket_send_async(ringbuf_socket *socket, rbmsg_hd *hd) 
+{
 	pcie_send_msg(socket->port_pcie, hd);
 }
 
-static void socket_receive(ringbuf_socket *socket, rbmsg_hd *hd) {	
+static void socket_receive(ringbuf_socket *socket, rbmsg_hd *hd) 
+{	
 	rbmsg_hd hd_ack;
 	namespace *namespc;
 	msg_handler handler = NULL;
@@ -403,10 +421,11 @@ static void socket_receive(ringbuf_socket *socket, rbmsg_hd *hd) {
 	handler(socket, hd);
 }
 
-static int socket_keepalive(ringbuf_socket *socket) {
+static int socket_keepalive(ringbuf_socket *socket) 
+{
 	rbmsg_hd hd;
 	hd.msg_type = msg_type_kalive;
-	hd.src_qid = dev->ivposition;
+	hd.src_qid = NODEID;
 	hd.is_sync = FALSE;
 
 	socket_send_sync(sockcet, &hd);
@@ -419,8 +438,9 @@ static int socket_keepalive(ringbuf_socket *socket) {
 	}
 }
 
-static void socket_disconnect(ringbuf_socket *socket) {
-
+static void socket_disconnect(ringbuf_socket *socket) 
+{
+	//TODO
 }
 
 static int handle_sys_conn(ringbuf_socket *socket, rbmsg_hd *hd) {
@@ -462,14 +482,15 @@ static int handle_sys_accept(ringbuf_socket *socket, rbmsg_hd *hd) {
 }
 
 static int handle_sys_kalive(ringbuf_socket *socket, rbmsg_hd *hd) {
-
+	socket->sync_toggle = TRUE;
 }
 
 static int handle_sys_disconn(ringbuf_socket *socket, rbmsg_hd *hd) {
-
+	//TODO
 }
 
-static int handle_sys_ack(ringbuf_socket *socket, rbmsg_hd *hd) {
+static int handle_sys_ack(ringbuf_socket *socket, rbmsg_hd *hd) 
+{
 	return 0;
 }
 		
@@ -548,6 +569,16 @@ static ringbuf_socket* endpoint_create_socket(ringbuf_endpoint *ep,
 	return socket;
 }
 
+static void endpoint_syswide_poll(struct work_struct *work) 
+{
+	rbmsg_hd hd;
+	ringbuf_socket *socket = (ringbuf_socket*)work->data;
+	while (TRUE) {
+		socket_receive(socket, &hd);
+		msleep(SLEEP_PERIOD_MSEC);
+	}
+}
+
 static void endpoint_register_msg_handler(ringbuf_endpoint *ep,
 			int nsp_index, int msg_type, msg_handler handler) {
 	if(handler == NULL || msg_type > MAX_MSG_TYPE || msg_type <= 0) {
@@ -587,110 +618,13 @@ static void endpoint_free_payload(ringbuf_endpoint *ep, rbmsg_hd *hd) {
 	// printk(KERN_INFO "free payload memory at offset: %lu\n", node->offset);
 }
 
-/*================================================================================================
-
-static void ringbuf_fifo_init(ringbuf_device *dev) 
-{
-	fifo fifo_indevice;
-
-	if(dev->role == Host) {
-		dev->payload_pool = gen_pool_create(0, -1);
-		if(gen_pool_add(dev->payload_pool, (unsigned long)(dev->payload_area),
-									3 << 20, -1)) {
-			printk(KERN_INFO "gen_pool create failed!!!!!");
-			return;
-		}
-
-		if(kfifo_size(dev->fifo_host_addr) != RINGBUF_SZ) {
-			memcpy(dev->fifo_host_addr, &fifo_indevice, 
-						sizeof(fifo_indevice));
-			INIT_KFIFO(*(dev->fifo_host_addr));
-			
-			*(dev->notify_guest_addr) = 0;
-			dev->notify_guest_history = 0;
-			dev->notify_host_history = 0;
-		} else {
-			printk(KERN_INFO "somebody stole it!!!\n");
-		}
-	} else {
-		if(kfifo_size(dev->fifo_guest_addr) != RINGBUF_SZ) {
-			memcpy(dev->fifo_guest_addr, &fifo_indevice, 
-						sizeof(fifo_indevice));
-			INIT_KFIFO(*(dev->fifo_guest_addr));
-
-			*(dev->notify_host_addr) = 0;
-			dev->notify_guest_history = 0;
-			dev->notify_host_history = 0;
-		} else {
-			printk(KERN_INFO "somebody stole it!!!\n");
-		}
-	}
-
-	register_msg_handler(NULL, msg_type_conn, handle_msg_type_conn);
-	register_msg_handler(NULL, msg_type_disconn, handle_msg_type_disconn);
-	register_msg_handler(NULL, msg_type_kalive, handle_msg_type_kalive);
-	register_msg_handler(NULL, msg_type_ack, handle_msg_type_ack);
-
-	tasklet_init(&dev->recv_msg_tasklet, recv_msg, (long)dev);
-	poll_workqueue = create_workqueue("poll_workqueue");
-	queue_work(poll_workqueue, &poll_work);
-}
+/*================================================================================================*/
 
 static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value)
 {
-	ringbuf_device *dev;
-	ringbuf_port *port;
-	unsigned int req_id;
-	unsigned int req_address;
-	rbmsg_hd hd;
-	int i, p;
-
     	switch (cmd) {
-    	case IOCTL_REG_NAMESPACE:
-		for(p = 0; p < NAMESPACE_NUM_MAX; p++) {
-			if(port_namespaces[p].name)
-				continue;
-			memcpy(port_namespaces + p, (port_namespace*)value, 
-					sizeof(port_namespace));
-			break;
-		}
-        	break;
-
-	case IOCTL_REQ:
-		req_id = (value >> 16) & 0xFFFF;
-		if(req_id <= 0) {
-			printk(KERN_INFO "req_id must be >0!!\n");
-			return -1;
-		}
-		dev = NULL;
-		for(i = 0; i < PORT_NUM_MAX; i++) {
-			port = &ringbuf_ports[i];
-			if(port->src_id == req_id && port->device->role == Guest) {
-				dev = ringbuf_ports[i].device;
-				break;
-			}
-		}
-		if(!dev) {
-			printk(KERN_INFO "unknown request src!!!\n");
-			return -1;
-		}
-
-		if(dev->role == Host) {
-			printk(KERN_INFO "Host CAN'T REQ!!");
-			return -1;
-		}
-		
-		req_address = value & 0xFFFFFFFF;
-
-		hd.msg_type = msg_type_req;
-		hd.src_qid = dev->ivposition;
-		hd.payload_off = req_address;
-		hd.payload_len = 0;
-		hd.is_sync = 0;
-		memcpy(hd.namespace, "demo_namespace", 15);
-		send_msg(dev->fifo_guest_addr, &hd, dev->notify_host_addr);
-		break;
-
+    	//case IOCTL_REG_NAMESPACE:
+	// case IOCTL_REQ:
 	case IOCTL_IVPOSITION:
 		printk(KERN_INFO "get ivposition: %d\n", NODEID);
 		return (long)NODEID;
@@ -699,7 +633,6 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 		printk(KERN_INFO "bad ioctl command: %d\n", cmd);
 		return -1;
 	}
-
 	return 0;
 }
 
@@ -712,13 +645,6 @@ static int ringbuf_open(struct inode * inode, struct file * filp)
 				RINGBUF_DEVICE_MINOR_NR);
 		return -ENODEV;
 	}
-
-	port_namespace namespace;
-	memcpy(namespace.name, "demo_namespace", 15);
-	register_msg_handler(&namespace, msg_type_req, handle_msg_type_req);
-	register_msg_handler(&namespace, msg_type_add, handle_msg_type_add);
-	register_msg_handler(&namespace, msg_type_free, handle_msg_type_free);
-	ringbuf_ioctl(NULL, IOCTL_REG_NAMESPACE, (long)&namespace);
    	return 0;
 }
 
@@ -728,18 +654,13 @@ static int ringbuf_release(struct inode * inode, struct file * filp)
    	return 0;
 }
 
-static int ringbuf_probe_device (struct pci_dev *pdev,
+static int ringbuf_probe_device(struct pci_dev *pdev,
 				const struct pci_device_id * ent) 
 {
 	int ret;
 	int i;
-	struct ringbuf_device *dev = kmalloc(sizeof(ringbuf_device), GFP_KERNEL);
+	ringbuf_endpoint *ep;
 	
-	for(i = 0; i < PORT_NUM_MAX; i++)
-		if(!ringbuf_ports[i].device)
-			break;
-	ringbuf_ports[i].device = dev;
-
 	printk(KERN_INFO "probing for device: %s@%d\n", (pci_name(pdev)), i);
 
 	ret = pci_enable_device(pdev);
@@ -747,76 +668,89 @@ static int ringbuf_probe_device (struct pci_dev *pdev,
 		printk(KERN_INFO "unable to enable device: %d\n", ret);
 		goto out;
 	}
-
 	ret = pci_request_regions(pdev, DEVNAME);
 	if (ret < 0) {
 		printk(KERN_INFO "unable to reserve resources: %d\n", ret);
 		goto disable_device;
 	}
 
-	pci_read_config_byte(pdev, PCI_REVISION_ID, &(dev->revision));
-	printk(KERN_INFO "device %d:%d, revision: %d\n", device_major_nr,
-		0, dev->revision);
+	for(i = 0; i < MAX_ENDPOINT_NUM; ++i) 
+		if(ringbuf_endpoints[i].device == NULL)
+			break;
+	ep = ringbuf_endpoints + i;
+	ep->device = kmalloc(sizeof(ringbuf_device), GFP_KERNEL);
 
-	dev->bar0_addr = pci_resource_start(pdev, 0);
-	dev->bar0_size = pci_resource_len(pdev, 0);
-	dev->bar1_addr = pci_resource_start(pdev, 1);
-	dev->bar1_size = pci_resource_len(pdev, 1);
-	dev->bar2_addr = pci_resource_start(pdev, 2);
-	dev->bar2_size = pci_resource_len(pdev, 2);
+	pci_read_config_byte(pdev, PCI_REVISION_ID, &(ep->device->revision));
+	printk(KERN_INFO "device %d:%d, revision: %d\n", 
+			device_major_nr, 0, ep->device->revision);
 
-	dev->dev = pdev;
-	if(((int)pci_name(pdev)[9] - 48) % 2){
-		dev->role = Host;
-		printk(KERN_INFO "I'm a host!!!!!!!!!!!!");
-	} else {
-		dev->role = Guest;
-		printk(KERN_INFO "I'm a Guest!!!!!!!!!!!!");
-	}
-	dev->ivposition = NODEID;
-	pci_set_drvdata(pdev, dev);
+	ep->device->bar0_addr = pci_resource_start(pdev, 0);
+	ep->device->bar0_size = pci_resource_len(pdev, 0);
+	ep->device->bar1_addr = pci_resource_start(pdev, 1);
+	ep->device->bar1_size = pci_resource_len(pdev, 1);
+	ep->device->bar2_addr = pci_resource_start(pdev, 2);
+	ep->device->bar2_size = pci_resource_len(pdev, 2);
 
-	dev->regs_addr = ioremap(dev->bar0_addr, dev->bar0_size);
-	if (!dev->regs_addr) {
+	ep->device->dev = pdev;
+	ep->device->ivposition = NODEID;
+	pci_set_drvdata(pdev, ep);
+	ep->device->regs_addr = ioremap(
+			ep->device->bar0_addr, ep->device->bar0_size);
+	if (!ep->device->regs_addr) {
 		printk(KERN_INFO "unable to ioremap bar0, sz: %d\n", 
-						dev->bar0_size);
+						ep->device->bar0_size);
 		goto release_regions;
 	}
-
-	dev->base_addr = ioremap(dev->bar2_addr, dev->bar2_size);
-	if (!dev->base_addr) {
+	ep->device->base_addr = ioremap(
+			ep->device->bar2_addr, ep->device->bar2_size);
+	if (!ep->device->base_addr) {
 		printk(KERN_INFO "unable to ioremap bar2, sz: %d\n", 
-						dev->bar2_size);
+						ep->device->bar2_size);
 		goto iounmap_bar0;
 	}
+	//TODO: get ep->remote_node_id
+	if(((int)pci_name(pdev)[9] - 48) % 2){
+		ep->role = Host;
+		printk(KERN_INFO "I'm a host!!!!!!!!!!!!");
+	} else {
+		ep->role = Guest;
+		printk(KERN_INFO "I'm a Guest!!!!!!!!!!!!");
+	}
 
-	dev->fifo_host_addr = (fifo*)dev->base_addr;
-	dev->fifo_guest_addr = (fifo*)(dev->base_addr + sizeof(fifo));
+	ep->mem_pool_area = ep->device->base_addr + sizeof(pcie_buffer) + 64;	
+	if(ep->role == Host) {
+		ep->mem_pool = gen_pool_create(0, -1);
+		if(gen_pool_add(ep->mem_pool, ep->mem_pool_area, 3 << 20, -1)) {
+			printk(KERN_INFO "gen_pool create failed!!!!!");
+			return;
+		}
+	}
 
-	dev->notify_guest_addr = (unsigned int *)(dev->base_addr + 2 * sizeof(fifo));
-	dev->notify_host_addr = dev->notify_guest_addr + 1;
-	
-	dev->payload_area = 
-		dev->base_addr + 2 * sizeof(fifo) 
-		+ 2 * sizeof(*dev->notify_guest_addr);	
+	socket_bind(&ep->syswide_socket, ep->device->base_addr, ep->role);
+	ep->syswide_socket.namespace_index = sys;
+	ep->syswide_socket.belongs_endpoint = ep;
+	ep->syswide_queue = alloc_workqueue("syswide", 0, 0);
+	INIT_WORK(&ep->syswide_work, endpoint_syswide_poll);
+	ep->syswide_work->data = (unsigned long)(&ep->syswide_socket);
+	queue_work(ep->syswide_queue, &ep->syswide_work);
 
-	ringbuf_fifo_init(dev);
-	printk(KERN_INFO "Host|Guest: %d %d | %d %d\n", 
-		*(dev->notify_host_addr), dev->notify_host_history, 
-		*(dev->notify_guest_addr), dev->notify_guest_history);
-	ringbuf_connect(dev);
-	printk(KERN_INFO "Host|Guest: %d %d | %d %d\n", 
-		*(dev->notify_host_addr), dev->notify_host_history, 
-		*(dev->notify_guest_addr), dev->notify_guest_history);
+	endpoint_register_msg_handler(ep, sys, msg_type_conn, handle_sys_conn);
+	endpoint_register_msg_handler(ep, sys, msg_type_accept, handle_sys_accept);
+	endpoint_register_msg_handler(ep, sys, msg_type_disconn, handle_sys_disconn);
+	endpoint_register_msg_handler(ep, sys, msg_type_kalive, handle_sys_kalive);
+	endpoint_register_msg_handler(ep, sys, msg_type_ack, handle_sys_ack);
+	endpoint_register_msg_handler(ep, sys, msg_type_req, handle_sys_req);
+	endpoint_register_msg_handler(ep, sys, msg_type_add, handle_sys_add);
+	endpoint_register_msg_handler(ep, sys, msg_type_free, handle_sys_free);
 
 	printk(KERN_INFO "device probed\n");
 	return 0;
 
 iounmap_bar0:
-    	iounmap(dev->regs_addr);
+    	iounmap(ep->device->regs_addr);
 
 release_regions:
-    	dev->dev = NULL;
+    	ep->device->dev = NULL;
     	pci_release_regions(pdev);
 
 disable_device:
@@ -828,15 +762,14 @@ out:
 
 static void ringbuf_remove_device(struct pci_dev* pdev)
 {
-	struct ringbuf_device *dev = pci_get_drvdata(pdev);
+	ringbuf_endpoint *ep = pci_get_drvdata(pdev);
 
 	printk(KERN_INFO "removing ivshmem device\n");
 	
-	//TODO: free the payloads pool!!!!!!!!!!!!!!
-	dev->dev = NULL;
-
-	iounmap(dev->regs_addr);
-	iounmap(dev->base_addr);
+	//TODO: free the endpoint!
+	ep->device->dev = NULL;
+	iounmap(ep->device->regs_addr);
+	iounmap(ep->device->base_addr);
 
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);	
@@ -844,8 +777,6 @@ static void ringbuf_remove_device(struct pci_dev* pdev)
 
 static void __exit ringbuf_cleanup(void)
 {
-	destroy_workqueue(poll_workqueue);
-
 	pci_unregister_driver(&ringbuf_pci_driver);
 	unregister_chrdev(device_major_nr, DEVNAME);
 }
@@ -874,5 +805,3 @@ error:
 	unregister_chrdev(device_major_nr, DEVNAME);
 	return err;
 }
-
-*/
