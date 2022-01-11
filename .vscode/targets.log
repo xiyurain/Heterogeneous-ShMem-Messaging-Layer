@@ -8,7 +8,7 @@ make: *** No rule to make target 'all'.  Stop.
 # This is free software: you are free to change and redistribute it.
 # There is NO WARRANTY, to the extent permitted by law.
 
-# Make data base, printed on Tue Jan  4 17:42:00 2022
+# Make data base, printed on Tue Jan 11 16:55:39 2022
 
 # Variables
 
@@ -167,7 +167,7 @@ SHLVL = 0
 # environment
 GNOME_SHELL_SESSION_MODE = ubuntu
 # environment
-VSCODE_IPC_HOOK_EXTHOST = /run/user/840487789/vscode-ipc-f5c717b7-7f4d-467e-8126-ee75dc7bb1a6.sock
+VSCODE_IPC_HOOK_EXTHOST = /run/user/840487789/vscode-ipc-6302c533-c45b-49ab-993b-fbb8c0c57097.sock
 # default
 MAKE_VERSION := 4.2.1
 # environment
@@ -257,9 +257,9 @@ VSCODE_PID = 2682797
 
 # Directories
 
-# . (device 2066, inode 6561254): 15 files, no impossibilities.
+# . (device 2066, inode 6561254): 17 files, no impossibilities.
 
-# 15 files, no impossibilities in 1 directories.
+# 17 files, no impossibilities in 1 directories.
 
 # Implicit Rules
 
@@ -285,7 +285,6 @@ Makefile:
 makefile:
 #  Implicit rule search has been done.
 #  File does not exist.
- 
 #  File has been updated.
 #  Failed to be updated.
 
@@ -296,6 +295,7 @@ makefile:
 #  File has not been updated.
 
 # Not a target:
+ 
 GNUmakefile:
 #  Implicit rule search has been done.
 #  File does not exist.
@@ -310,12 +310,12 @@ GNUmakefile:
 
 # No general ('VPATH' variable) search path.
 
-# strcache buffers: 1 (0) / strings = 23 / storage = 220 B / avg = 9 B
-# current buf: size = 8162 B / used = 220 B / count = 23 / avg = 9 B
+# strcache buffers: 1 (0) / strings = 25 / storage = 239 B / avg = 9 B
+# current buf: size = 8162 B / used = 239 B / count = 25 / avg = 9 B
 
-# strcache performance: lookups = 26 / hit rate = 11%
+# strcache performance: lookups = 28 / hit rate = 10%
 # hash-table stats:
-# Load=23/8192=0%, Rehash=0, Collisions=1/26=4%
-# Finished Make data base on Tue Jan  4 17:42:00 2022
+# Load=25/8192=0%, Rehash=0, Collisions=1/28=4%
+# Finished Make data base on Tue Jan 11 16:55:39 2022
 
  
