@@ -8,7 +8,7 @@ make: *** No rule to make target 'all'.  Stop.
 # This is free software: you are free to change and redistribute it.
 # There is NO WARRANTY, to the extent permitted by law.
 
-# Make data base, printed on Tue Jan 11 16:55:39 2022
+# Make data base, printed on Thu Jan 13 17:25:34 2022
 
 # Variables
 
@@ -167,7 +167,7 @@ SHLVL = 0
 # environment
 GNOME_SHELL_SESSION_MODE = ubuntu
 # environment
-VSCODE_IPC_HOOK_EXTHOST = /run/user/840487789/vscode-ipc-6302c533-c45b-49ab-993b-fbb8c0c57097.sock
+VSCODE_IPC_HOOK_EXTHOST = /run/user/840487789/vscode-ipc-33859561-e49c-401f-a620-255bc20715a2.sock
 # default
 MAKE_VERSION := 4.2.1
 # environment
@@ -293,9 +293,9 @@ makefile:
 #  Implicit rule search has not been done.
 #  Modification time never checked.
 #  File has not been updated.
+ 
 
 # Not a target:
- 
 GNUmakefile:
 #  Implicit rule search has been done.
 #  File does not exist.
@@ -316,6 +316,6 @@ GNUmakefile:
 # strcache performance: lookups = 28 / hit rate = 10%
 # hash-table stats:
 # Load=25/8192=0%, Rehash=0, Collisions=1/28=4%
-# Finished Make data base on Tue Jan 11 16:55:39 2022
+# Finished Make data base on Thu Jan 13 17:25:34 2022
 
  

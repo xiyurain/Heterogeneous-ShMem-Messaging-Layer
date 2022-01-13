@@ -36,8 +36,6 @@ MODULE_VERSION("1.0");
 #define TRUE 1
 #define FALSE 0
 #define RINGBUF_DEVICE_MINOR_NR 0
-#define MAX_ENDPOINT_NUM 8
-#define MAX_PORT_NUM 16
 #define MAX_MSG_TYPE 16
 #define MIN_MSG_CTRLTYPE 8
 #define MAX_SERVICE_NUM 8
@@ -75,19 +73,7 @@ enum {
 
 typedef int (*msg_handler)(ringbuf_socket *socket, rbmsg_hd *hd);
 
-typedef struct ringbuf_socket {
-	char 			name[64];
-	int 			in_use;
-	int 			listening;
-	int 			service_index;
 
-	pcie_port		*listening_port;
-
-	int			sync_toggle;
-	struct timer_list 	keep_alive_timer;
-} ringbuf_socket;
-
-static ringbuf_endpoint ringbuf_endpoints[MAX_ENDPOINT_NUM];
 
 typedef struct service {
 	char 			name[64];
@@ -96,16 +82,6 @@ typedef struct service {
 } service;
 
 static service services[MAX_SERVICE_NUM];
-
-/*API of the ringbuf socket*/
-static void socket_bind(ringbuf_socket *socket, unsigned long addr, int role);
-static void socket_listen(ringbuf_endpoint *ep, ringbuf_socket *socket);
-static void socket_connect(ringbuf_endpoint *ep, ringbuf_socket *socket);
-static void socket_send_sync(ringbuf_socket *socket, rbmsg_hd *hd);
-static void socket_send_async(ringbuf_socket *socket, rbmsg_hd *hd);
-static void socket_receive(ringbuf_socket *socket, rbmsg_hd *hd);
-static void socket_disconnect(ringbuf_socket *socket);
-static int socket_keepalive(ringbuf_socket *socket);
 
 /*API of the ringbuf device driver*/
 static int __init ringbuf_init(void);
@@ -145,106 +121,6 @@ MODULE_DEVICE_TABLE(pci, ringbuf_id_table);
 module_init(ringbuf_init);
 module_exit(ringbuf_cleanup);
 
-static void socket_bind(ringbuf_socket *socket, unsigned int remote_id) 
-{
-	int i;
-	for(i = 0; i < MAX_ENDPOINT_NUM; i++) 
-		if(ringbuf_endpoints[i].remote_node_id == remote_id 
-				&& ringbuf_endpoints[i].role == Guest)
-			break;
-	
-
-}
-
-static void socket_listen(ringbuf_socket *socket) 
-{
-	socket->listening = TRUE;
-}
-
-static void socket_accept(ringbuf_socket *socket, rbmsg_hd *hd) 
-{
-	hd->is_sync = TRUE;
-	hd->msg_type = msg_type_accept;
-	hd->payload_off = socket->port_pcie.buffer_addr - ep->device.base_addr;
-	hd->src_node = NODEID;
-
-	socket->listening = FALSE;
-}
-
-static void socket_connect(ringbuf_socket *socket) 
-{
-	rbmsg_hd hd;
-	
-	hd.msg_type = msg_type_conn;
-	hd.src_qid = dev->ivposition;
-	hd.is_sync = FALSE;
-	hd.payload_len = socket->namespace_index;
-
-	socket->listening = TRUE;
-	socket_send_async(sys_socket->port_pcie, &hd);	
-}
-
-static void socket_send_sync(ringbuf_socket *socket, rbmsg_hd *hd) 
-{
-	hd->is_sync = TRUE;
-	pcie_send_msg(socket->port_pcie, hd);
-	
-	while (!pcie_poll(socket->port_pcie));
-	pcie_recv_msg(socket->port_pcie, hd);
-	if(hd->msg_type != msg_type_ack) {
-		printk(KERN_INFO "socket_send_sync went wrong!!!\n");
-	}
-}
-
-static void socket_send_async(ringbuf_socket *socket, rbmsg_hd *hd) 
-{
-	pcie_send_msg(socket->port_pcie, hd);
-}
-
-static void socket_receive(ringbuf_socket *socket, rbmsg_hd *hd) 
-{	
-	rbmsg_hd hd_ack;
-	namespace *namespc;
-	msg_handler handler = NULL;
-
-	while(!pcie_poll(socket->port_pcie));
-	pcie_recv_msg(socket->port_pcie, &hd);
-
-	if(hd->is_sync == TRUE){
-		hd_ack.is_sync = 0;
-		hd_ack.msg_type = msg_type_ack;
-		hd_ack.payload_off = hd->payload_off;
-		hd_ack.src_node = hd->src_node;
-		pcie_send_msg(socket->port_pcie, &hd_ack);
-	}
-
-	ringbuf_endpoint *ep = (ringbuf_endpoint*)socket->belongs_endpoint;
-	namespc = ep->namespaces + socket->namespace_index;
-	handler = namespc->msg_handlers[hd->msg_type];
-	handler(socket, hd);
-}
-
-static int socket_keepalive(ringbuf_socket *socket) 
-{
-	rbmsg_hd hd;
-	hd.msg_type = msg_type_kalive;
-	hd.src_qid = NODEID;
-	hd.is_sync = FALSE;
-
-	socket_send_sync(sockcet, &hd);
-	msleep(10000);
-	if(socket->sync_toggle) {
-		socket->sync_toggle = 0;
-		return 0;
-	} else {
-		return -1;
-	}
-}
-
-static void socket_disconnect(ringbuf_socket *socket) 
-{
-	//TODO
-}
 
 static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int value)
 {
@@ -305,66 +181,6 @@ static int ringbuf_probe_device(struct pci_dev *pdev,
 		printk(KERN_INFO "unable to reserve resources: %d\n", ret);
 		goto disable_device;
 	}
-
-	for(i = 0; i < MAX_ENDPOINT_NUM; ++i) 
-		if(ringbuf_endpoints[i].device == NULL)
-			break;
-	ep = ringbuf_endpoints + i;
-	ep->device = kmalloc(sizeof(ringbuf_device), GFP_KERNEL);
-
-	pci_read_config_byte(pdev, PCI_REVISION_ID, &(ep->device->revision));
-	printk(KERN_INFO "device %d:%d, revision: %d\n", 
-			device_major_nr, 0, ep->device->revision);
-
-	ep->device->bar0_addr = pci_resource_start(pdev, 0);
-	ep->device->bar0_size = pci_resource_len(pdev, 0);
-	ep->device->bar1_addr = pci_resource_start(pdev, 1);
-	ep->device->bar1_size = pci_resource_len(pdev, 1);
-	ep->device->bar2_addr = pci_resource_start(pdev, 2);
-	ep->device->bar2_size = pci_resource_len(pdev, 2);
-
-	ep->device->dev = pdev;
-	ep->device->ivposition = NODEID;
-	pci_set_drvdata(pdev, ep);
-	ep->device->regs_addr = ioremap(
-			ep->device->bar0_addr, ep->device->bar0_size);
-	if (!ep->device->regs_addr) {
-		printk(KERN_INFO "unable to ioremap bar0, sz: %d\n", 
-						ep->device->bar0_size);
-		goto release_regions;
-	}
-	ep->device->base_addr = ioremap(
-			ep->device->bar2_addr, ep->device->bar2_size);
-	if (!ep->device->base_addr) {
-		printk(KERN_INFO "unable to ioremap bar2, sz: %d\n", 
-						ep->device->bar2_size);
-		goto iounmap_bar0;
-	}
-	//TODO: get ep->remote_node_id
-	if(((int)pci_name(pdev)[9] - 48) % 2){
-		ep->role = Host;
-		printk(KERN_INFO "I'm a host!!!!!!!!!!!!");
-	} else {
-		ep->role = Guest;
-		printk(KERN_INFO "I'm a Guest!!!!!!!!!!!!");
-	}
-
-	ep->mem_pool_area = ep->device->base_addr + sizeof(pcie_buffer) + 64;	
-	if(ep->role == Host) {
-		ep->mem_pool = gen_pool_create(0, -1);
-		if(gen_pool_add(ep->mem_pool, ep->mem_pool_area, 3 << 20, -1)) {
-			printk(KERN_INFO "gen_pool create failed!!!!!");
-			return;
-		}
-	}
-
-	socket_bind(&ep->syswide_socket, ep->device->base_addr, ep->role);
-	ep->syswide_socket.namespace_index = sys;
-	ep->syswide_socket.belongs_endpoint = ep;
-	ep->syswide_queue = alloc_workqueue("syswide", 0, 0);
-	INIT_WORK(&ep->syswide_work, endpoint_syswide_poll);
-	ep->syswide_work->data = (unsigned long)(&ep->syswide_socket);
-	queue_work(ep->syswide_queue, &ep->syswide_work);
 
 	endpoint_register_msg_handler(ep, sys, msg_type_conn, handle_sys_conn);
 	endpoint_register_msg_handler(ep, sys, msg_type_accept, handle_sys_accept);
