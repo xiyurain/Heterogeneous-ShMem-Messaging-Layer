@@ -1,3 +1,5 @@
+#include "endpoint.h"
+
 typedef struct ringbuf_socket {
 	char 			name[64];
 	int 			in_use;
@@ -5,6 +7,7 @@ typedef struct ringbuf_socket {
 	int 			service_index;
 
 	pcie_port		*bind_port;
+	ringbuf_endpoint	*bind_endpoint;
 
 	int			sync_toggle;
 	struct timer_list 	keep_alive_timer;

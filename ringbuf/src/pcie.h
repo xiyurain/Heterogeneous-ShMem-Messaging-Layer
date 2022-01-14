@@ -42,6 +42,7 @@ typedef struct pcie_port {
 
 /*API directly on the PCIE port*/
 static void pcie_port_init(pcie_port *port, unsigned long addr, int role);
+static void pcie_port_free(pcie_port *port);
 static int pcie_poll(pcie_port *port);
 static int pcie_recv_msg(pcie_port *port, rbmsg_hd *hd);
 static int pcie_send_msg(pcie_port *port, rbmsg_hd *hd);

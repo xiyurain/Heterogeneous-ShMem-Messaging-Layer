@@ -12,6 +12,7 @@ static void pcie_port_init(pcie_port *port, unsigned long addr, int role)
 	struct pcie_buffer *buffer = (struct pcie_buffer*)addr;
 
 	port = kmalloc(sizeof(pcie_port), GFP_KERNEL);
+	//TODO: memset
 	port->buffer_addr = buffer;
 	port->notified_history = 0;
 
@@ -34,6 +35,14 @@ static void pcie_port_init(pcie_port *port, unsigned long addr, int role)
 		port->notify_remote = &buffer->notify_host;
 		port->be_notified = &buffer->notify_guest;
 	}
+}
+
+/*
+ * pcie_port_free: init a pcie_port and bind pcie ring buffer
+ * port: the port to free
+ */
+static void pcie_port_free(pcie_port *port) {
+	kfree(port);
 }
 
 /* 

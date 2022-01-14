@@ -166,11 +166,9 @@ static int ringbuf_probe_device(struct pci_dev *pdev,
 				const struct pci_device_id * ent) 
 {
 	int ret;
-	int i;
 	ringbuf_endpoint *ep;
 	
 	printk(KERN_INFO "probing for device: %s@%d\n", (pci_name(pdev)), i);
-
 	ret = pci_enable_device(pdev);
 	if (ret < 0) {
 		printk(KERN_INFO "unable to enable device: %d\n", ret);
@@ -182,24 +180,10 @@ static int ringbuf_probe_device(struct pci_dev *pdev,
 		goto disable_device;
 	}
 
-	endpoint_register_msg_handler(ep, sys, msg_type_conn, handle_sys_conn);
-	endpoint_register_msg_handler(ep, sys, msg_type_accept, handle_sys_accept);
-	endpoint_register_msg_handler(ep, sys, msg_type_disconn, handle_sys_disconn);
-	endpoint_register_msg_handler(ep, sys, msg_type_kalive, handle_sys_kalive);
-	endpoint_register_msg_handler(ep, sys, msg_type_ack, handle_sys_ack);
-	endpoint_register_msg_handler(ep, sys, msg_type_req, handle_sys_req);
-	endpoint_register_msg_handler(ep, sys, msg_type_add, handle_sys_add);
-	endpoint_register_msg_handler(ep, sys, msg_type_free, handle_sys_free);
-
+	ep = endpoint_init(pdev);
+	register_sys_handlers(ep);
 	printk(KERN_INFO "device probed\n");
 	return 0;
-
-iounmap_bar0:
-    	iounmap(ep->device->regs_addr);
-
-release_regions:
-    	ep->device->dev = NULL;
-    	pci_release_regions(pdev);
 
 disable_device:
     	pci_disable_device(pdev);
@@ -210,14 +194,8 @@ out:
 
 static void ringbuf_remove_device(struct pci_dev* pdev)
 {
-	ringbuf_endpoint *ep = pci_get_drvdata(pdev);
-
 	printk(KERN_INFO "removing ivshmem device\n");
-	
-	//TODO: free the endpoint!
-	ep->device->dev = NULL;
-	iounmap(ep->device->regs_addr);
-	iounmap(ep->device->base_addr);
+	endpoint_destroy(pdev);
 
 	pci_release_regions(pdev);
 	pci_disable_device(pdev);	

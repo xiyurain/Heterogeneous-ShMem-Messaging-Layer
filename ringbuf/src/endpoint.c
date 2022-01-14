@@ -2,6 +2,7 @@
 
 static void endpoint_init_dev(ringbuf_device *dev, struct pci_dev *pdev) {
 	dev = kmalloc(sizeof(ringbuf_device), GFP_KERNEL);
+	memset(dev, 0, sizeof(ringbuf_device));
 
 	pci_read_config_byte(pdev, PCI_REVISION_ID, &(dev->revision));
 	printk(KERN_INFO "device %d:%d, revision: %d\n", 
@@ -14,9 +15,8 @@ static void endpoint_init_dev(ringbuf_device *dev, struct pci_dev *pdev) {
 	dev->bar2_addr = pci_resource_start(pdev, 2);
 	dev->bar2_size = pci_resource_len(pdev, 2);
 
-	dev->dev = pdev;
+	dev->pcie_dev = pdev;
 	dev->ivposition = NODEID;
-	pci_set_drvdata(pdev, ep);
 	dev->regs_addr = ioremap(dev->bar0_addr, dev->bar0_size);
 	if (!dev->regs_addr) {
 		printk(KERN_INFO "unable to ioremap bar0, sz: %d\n", 
@@ -31,7 +31,16 @@ static void endpoint_init_dev(ringbuf_device *dev, struct pci_dev *pdev) {
 	}
 }
 
-static void endpoint_init(struct pci_dev *pdev, unsigned int role) {
+static void endpoint_destroy_dev(ringbuf_device *dev) {
+	iounmap(dev->regs_addr);
+	iounmap(dev->base_addr);
+
+	kfree(dev);
+	dev = NULL;
+}
+
+static ringbuf_endpoint *endpoint_init(struct pci_dev *pdev) {
+	int i;
 	ringbuf_endpoint *ep;
 
 	for(i = 0; i < MAX_ENDPOINT_NUM; ++i) 
@@ -50,31 +59,57 @@ static void endpoint_init(struct pci_dev *pdev, unsigned int role) {
 	ep->mem_pool_area = ep->device->base_addr + sizeof(pcie_buffer) + 64;	
 	if(ep->role == Host) {
 		ep->mem_pool = gen_pool_create(0, -1);
-		if(gen_pool_add(ep->mem_pool, ep->mem_pool_area, 3 << 20, -1)) {
+		if(gen_pool_add(ep->mem_pool, 
+					ep->mem_pool_area, 3 << 20, -1)) {
 			printk(KERN_INFO "gen_pool create failed!!!!!");
 			return;
 		}
 	}
 
-	// socket_bind(&ep->syswide_socket, ep->device->base_addr, ep->role);
-	// ep->syswide_socket.namespace_index = sys;
-	// ep->syswide_socket.belongs_endpoint = ep;
-	// ep->syswide_queue = alloc_workqueue("syswide", 0, 0);
-	// INIT_WORK(&ep->syswide_work, endpoint_syswide_poll);
-	// ep->syswide_work->data = (unsigned long)(&ep->syswide_socket);
-	// queue_work(ep->syswide_queue, &ep->syswide_work);
+	pci_set_drvdata(pdev, ep);
+	return ep;
 }
 
-static void endpoint_destroy(unsigned int remote_id, unsigned int role) {
+static void endpoint_destroy(struct pci_dev *pdev) {
+	ringbuf_endpoint *ep = pci_get_drvdata(pdev);
+	pci_set_drvdata(pdev, NULL);
 
+	gen_pool_destroy(ep->mem_pool);
+	memset(ep->mem_pool_area, 0, 3<<20);
+
+	endpoint_destroy_dev(ep->device);
 }
 
-static pcie_port *endpoint_alloc_port(ringbuf_endpoint *ep) {
+static pcie_port *endpoint_alloc_port(ringbuf_endpoint *ep, 
+					unsigned long buf_addr) {
+	int i;
+	pcie_port *port;
 
+	for(i = 0; i < MAX_PORT_NUM; ++i) {
+		if(ep->pcie_ports[i] == NULL)
+			break;
+	port = ep->pcie_ports[i];
+
+	if(ep->role == Host)
+		buf_addr = endpoint_add_payload(ep, sizeof(pcie_buffer));
+	pcie_port_init(port, buf_addr, ep->role);
+
+	return port;
 }
 
-static int endpoint_free_port(ringbuf_endpoint *ep) {
+static int endpoint_free_port(ringbuf_endpoint *ep, pcie_port *port) {
+	int i;
+	
+	for(i = 0; i < MAX_PORT_NUM; ++i) 
+		if(ep->pcie_ports[i] == port)
+			break;
+	if(i == MAX_PORT_NUM)
+		return -1;
+	
+	endpoint_free_payload(ep, port->buffer_addr, sizeof(pcie_buffer));
+	pcie_port_free(port);
 
+	return 0;
 }
 
 static unsigned long endpoint_add_payload(ringbuf_endpoint *ep, size_t len) {
@@ -88,67 +123,8 @@ static unsigned long endpoint_add_payload(ringbuf_endpoint *ep, size_t len) {
 	return offset;
 }
 
-static void endpoint_free_payload(ringbuf_endpoint *ep, rbmsg_hd *hd) {
-	gen_pool_free(ep->mem_pool, 
-		ep->mem_pool_area + hd->payload_off, hd->payload_len);
+static void endpoint_free_payload(ringbuf_endpoint *ep, 
+				unsigned long addr, size_t len) {
+	gen_pool_free(ep->mem_pool, addr, len);
 	// printk(KERN_INFO "free payload memory at offset: %lu\n", node->offset);
 }
-
-static void endpoint_syswide_poll(struct work_struct *work) 
-{
-	rbmsg_hd hd;
-	ringbuf_socket *socket = (ringbuf_socket*)work->data;
-	while (TRUE) {
-		socket_receive(socket, &hd);
-		msleep(SLEEP_PERIOD_MSEC);
-	}
-}
-
-// static void endpoint_register_msg_handler(ringbuf_endpoint *ep,
-// 			int nsp_index, int msg_type, msg_handler handler) {
-// 	if(handler == NULL || msg_type > MAX_MSG_TYPE || msg_type <= 0) {
-// 		return;
-// 	}
-// 	if(nsp_index > MAX_NAMESPACE_NUM || nsp_index < 0){
-// 		return;
-// 	}
-// 	ep->namespaces[nsp_index].msg_handlers[msg_type] = handler;
-// }
-
-// static void endpoint_unregister_msg_handler(ringbuf_endpoint *ep, 
-// 					int nsp_index, int msg_type) {
-// 	if(handler == NULL || msg_type > MAX_MSG_TYPE || msg_type <= 0) {
-// 		return;
-// 	}
-// 	if(nsp_index > MAX_NAMESPACE_NUM || nsp_index < 0){
-// 		return;
-// 	}
-// 	ep->namespaces[nsp_index].msg_handlers[msg_type] = NULL;
-// }
-
-// static ringbuf_socket* endpoint_create_socket(ringbuf_endpoint *ep, 
-// 					int nsp_index, char *socket_name) {
-// 	int i;
-// 	ringbuf_socket *socket;
-// 	unsigned long buffer_offset;
-
-// 	for(i = 0; i < MAX_SOCKET_NUM; i++) {
-// 		if(ep->sockets[i].in_use == FALSE)
-// 			break;
-// 	}
-// 	socket = ep->sockets + i;
-
-// 	socket->in_use = TRUE;
-// 	socket->belongs_endpoint = ep;
-// 	strcpy(socket->name, socket_name);
-// 	socket->namespace_index = nsp_index;
-// 	socket->listening = FALSE;
-	
-// 	socket->sync_toggle = 0;
-// 	if(ep->role == Host) {
-// 		buffer_offset = endpoint_add_payload(ep, sizeof(struct pcie_buffer));
-// 		socket_bind(socket, ep->device->base_addr + buffer_offset, ep->role);
-// 	}
-	
-// 	return socket;
-// }

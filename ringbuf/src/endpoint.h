@@ -10,7 +10,7 @@ static ringbuf_endpoint ringbuf_endpoints[MAX_ENDPOINT_NUM];
  * @regs_addr: physical address of shmem PCIe dev regs
 */
 typedef struct ringbuf_device {
-	struct pci_dev		*dev;
+	struct pci_dev		*pcie_dev;
 	u8 			revision;
 	unsigned int 		ivposition;
 
@@ -38,10 +38,15 @@ typedef struct ringbuf_endpoint {
 
 /*API of the ringbuf endpoint*/
 static void endpoint_init_dev(ringbuf_device *dev, struct pci_dev *pdev);
-static void endpoint_init(struct pci_dev *pdev, unsigned int role);
-static void endpoint_destroy(unsigned int remote_id, unsigned int role);
-static pcie_port *endpoint_alloc_port(ringbuf_endpoint *ep);
-static int endpoint_free_port(ringbuf_endpoint *ep);
+static void endpoint_destroy_dev(ringbuf_device *dev);
+
+static ringbuf_endpoint *endpoint_init(struct pci_dev *pdev);
+static void endpoint_destroy(struct pci_dev *pdev);
+
+static pcie_port *endpoint_alloc_port(ringbuf_endpoint *ep, 
+					unsigned long buf_addr);
+static int endpoint_free_port(ringbuf_endpoint *ep, pcie_port *port);
+
 static unsigned long endpoint_add_payload(ringbuf_endpoint *ep, size_t len);
-static void endpoint_free_payload(ringbuf_endpoint *ep, rbmsg_hd *hd);
-static void endpoint_syswide_poll(struct work_struct *work);
+static void endpoint_free_payload(ringbuf_endpoint *ep, 
+				unsigned long addr, size_t len);

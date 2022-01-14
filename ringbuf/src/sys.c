@@ -98,3 +98,22 @@ static int handle_msg_type_free(ringbuf_socket *socket, rbmsg_hd *hd)
 	endpoint_free_payload((ringbuf_endpoint*)socket->belongs_endpoint, hd);
 	return 0;
 }
+
+static int register_sys_handlers(ringbuf_endpoint *ep) {
+	// socket_bind(&ep->syswide_socket, ep->device->base_addr, ep->role);
+	// ep->syswide_socket.namespace_index = sys;
+	// ep->syswide_socket.belongs_endpoint = ep;
+	// ep->syswide_queue = alloc_workqueue("syswide", 0, 0);
+	// INIT_WORK(&ep->syswide_work, endpoint_syswide_poll);
+	// ep->syswide_work->data = (unsigned long)(&ep->syswide_socket);
+	// queue_work(ep->syswide_queue, &ep->syswide_work);
+
+	// endpoint_register_msg_handler(ep, sys, msg_type_conn, handle_sys_conn);
+	// endpoint_register_msg_handler(ep, sys, msg_type_accept, handle_sys_accept);
+	// endpoint_register_msg_handler(ep, sys, msg_type_disconn, handle_sys_disconn);
+	// endpoint_register_msg_handler(ep, sys, msg_type_kalive, handle_sys_kalive);
+	// endpoint_register_msg_handler(ep, sys, msg_type_ack, handle_sys_ack);
+	// endpoint_register_msg_handler(ep, sys, msg_type_req, handle_sys_req);
+	// endpoint_register_msg_handler(ep, sys, msg_type_add, handle_sys_add);
+	// endpoint_register_msg_handler(ep, sys, msg_type_free, handle_sys_free);
+}
