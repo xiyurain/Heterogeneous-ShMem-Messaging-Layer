@@ -88,10 +88,6 @@ static void socket_receive(ringbuf_socket *sock, rbmsg_hd *hd)
 		hd_ack.payload_off = hd->payload_off;
 		pcie_send_msg(sock->bind_port, &hd_ack);
 	}
-
-	// namespc = ep->namespaces + socket->namespace_index;
-	// handler = namespc->msg_handlers[hd->msg_type];
-	// handler(socket, hd);
 }
 
 static int socket_keepalive(ringbuf_socket *sock) 
@@ -103,8 +99,8 @@ static int socket_keepalive(ringbuf_socket *sock)
 
 	socket_send_sync(sock, &hd);
 	msleep(10000);
-	if(sock->sync_toggle) {
-		sock->sync_toggle = 0;
+	if(sock->sync_toggle == TRUE) {
+		sock->sync_toggle = FALSE;
 		return 0;
 	} else {
 		return -1;
