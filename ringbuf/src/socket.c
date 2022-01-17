@@ -1,27 +1,33 @@
 #include "socket.h"
 
-static void socket_bind(ringbuf_socket *socket, unsigned int remote_id) 
+static ringbuf_socket *socket_create(char *name, char *service) 
+{
+	ringbuf_socket *sock = kmalloc(sizeof(ringbuf_socket), GFP_KERNEL);
+	memset(sock, 0, sizeof(ringbuf_socket));
+
+	strcpy(sock->name, name);
+	strcpy(sock->service, service);
+
+	return sock;	
+}
+
+static void socket_bind(ringbuf_socket *sock, 
+		unsigned int remote_id, int role, unsigned long buf_addr) 
 {
 	int i;
-	for(i = 0; i < MAX_ENDPOINT_NUM; i++) 
-		if(ringbuf_endpoints[i].remote_node_id == remote_id 
-				&& ringbuf_endpoints[i].role == Guest)
+
+	for(i = 0; i < MAX_ENDPOINT_NUM; ++i) 
+		if(ringbuf_endpoints[i].remote_node_id == remote_id &&
+					ringbuf_endpoints[i].role == role)
 			break;
+
+	sock->bind_endpoint = ringbuf_endpoints + i;
+	sock->bind_port = endpoint_alloc_port(sock->bind_endpoint, buf_addr);
 }
 
-static void socket_listen(ringbuf_socket *socket) 
+static void socket_listen(ringbuf_socket *sock)
 {
-	socket->listening = TRUE;
-}
-
-static void socket_accept(ringbuf_socket *socket, rbmsg_hd *hd) 
-{
-	hd->is_sync = TRUE;
-	hd->msg_type = msg_type_accept;
-	hd->payload_off = socket->port_pcie.buffer_addr - ep->device.base_addr;
-	hd->src_node = NODEID;
-
-	socket->listening = FALSE;
+	sock->is_listening = TRUE;
 }
 
 static void socket_connect(ringbuf_socket *socket) 
@@ -35,6 +41,16 @@ static void socket_connect(ringbuf_socket *socket)
 
 	socket->listening = TRUE;
 	socket_send_async(sys_socket->port_pcie, &hd);	
+}
+
+static void socket_accept(ringbuf_socket *socket, rbmsg_hd *hd) 
+{
+	hd->is_sync = TRUE;
+	hd->msg_type = msg_type_accept;
+	hd->payload_off = socket->port_pcie.buffer_addr - ep->device.base_addr;
+	hd->src_node = NODEID;
+
+	socket->listening = FALSE;
 }
 
 static void socket_send_sync(ringbuf_socket *socket, rbmsg_hd *hd) 
