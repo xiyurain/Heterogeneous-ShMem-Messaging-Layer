@@ -32,6 +32,7 @@ typedef struct ringbuf_endpoint {
 	void __iomem		*mem_pool_area;
 	struct gen_pool		*mem_pool;
 
+	ringbuf_socket		*system_sock;
 	pcie_port		*pcie_ports[MAX_PORT_NUM];
 } ringbuf_endpoint;
 

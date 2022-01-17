@@ -48,7 +48,7 @@ MODULE_VERSION("1.0");
 #define IOCTL_MAGIC		('f')
 #define IOCTL_SOCKET		_IOW(IOCTL_MAGIC, 1, u32)
 #define IOCTL_REQ		_IO(IOCTL_MAGIC, 2)
-#define IOCTL_IVPOSITION	_IOR(IOCTL_MAGIC, 3, u32)
+#define IOCTL_NODEID		_IOR(IOCTL_MAGIC, 3, u32)
 #define IVPOSITION_REG_OFF	0x08
 #define DOORBELL_REG_OFF	0x0c
 
@@ -61,25 +61,6 @@ enum {
 	Guest	= 	0,
 	Host	=	1,
 };
-
-/*namespace*/
-enum {
-	sys 	= 	0,
-	net 	= 	1,
-	fs	=	2,
-	vm 	= 	3,
-	proc 	=	4,
-};
-
-typedef int (*msg_handler)(ringbuf_socket *socket, rbmsg_hd *hd);
-
-typedef struct service {
-	char 			name[64];
-	msg_handler 		msg_handlers[MAX_MSG_TYPE];
-	ringbuf_socket		*sockets[MAX_SOCKET_NUM];
-} service;
-
-static service services[MAX_SERVICE_NUM];
 
 /*API of the ringbuf device driver*/
 static int __init ringbuf_init(void);
@@ -127,12 +108,9 @@ static long ringbuf_ioctl(struct file *fp, unsigned int cmd,  long unsigned int 
 
     	switch (cmd) {
     	case IOCTL_SOCKET://TODO
-		// remote_id = *((int*)value);
-
-		// *(void*)value = ep-> 
-
-	case IOCTL_IVPOSITION:
-		printk(KERN_INFO "get ivposition: %d\n", NODEID);
+		
+	case IOCTL_NODEID:
+		printk(KERN_INFO "get NODEID: %d\n", NODEID);
 		return (long)NODEID;
 
 	default:

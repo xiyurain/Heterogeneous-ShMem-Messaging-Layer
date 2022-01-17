@@ -1,8 +1,6 @@
 enum {
 	/* message type*/
-	msg_type_req 		=	1,
-	msg_type_add		=	2,
-	msg_type_free		=	3,
+
 	/* control message types*/
 	msg_type_conn 		=	8,
 	msg_type_accept		=	9,
@@ -17,6 +15,7 @@ typedef struct ringbuf_msg_hd {
 	unsigned int is_sync;
 	unsigned int payload_off;
 	ssize_t payload_len;
+	char service[16];
 } rbmsg_hd;
 
 typedef STRUCT_KFIFO(char, RINGBUF_SZ) fifo;
