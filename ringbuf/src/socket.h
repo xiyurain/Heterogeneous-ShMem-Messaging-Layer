@@ -1,4 +1,5 @@
 #include "endpoint.h"
+#include "sys_msgtype.h"
 
 typedef struct ringbuf_socket {
 	char 			name[64];

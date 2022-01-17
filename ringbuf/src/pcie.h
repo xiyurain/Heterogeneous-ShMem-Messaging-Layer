@@ -1,13 +1,4 @@
-enum {
-	/* message type*/
-
-	/* control message types*/
-	msg_type_conn 		=	8,
-	msg_type_accept		=	9,
-	msg_type_disconn	=	10,
-	msg_type_kalive 	= 	11,
-	msg_type_ack		=	12,
-};
+#define MSG_SZ sizeof(rbmsg_hd)
 
 typedef struct ringbuf_msg_hd {
 	unsigned int src_node;

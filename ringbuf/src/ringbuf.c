@@ -30,16 +30,9 @@ MODULE_AUTHOR("Xiangyu Ren <180110718@mail.hit.edu.cn>");
 MODULE_DESCRIPTION("ring buffer based on Inter-VM shared memory module");
 MODULE_VERSION("1.0");
 
-#define RINGBUF_SZ 512
-#define MSG_SZ sizeof(rbmsg_hd)
-#define BUF_INFO_SZ sizeof(ringbuf_info)
 #define TRUE 1
 #define FALSE 0
 #define RINGBUF_DEVICE_MINOR_NR 0
-#define MAX_MSG_TYPE 16
-#define MIN_MSG_CTRLTYPE 8
-#define MAX_SERVICE_NUM 8
-#define MAX_SOCKET_NUM 64
 #define QEMU_PROCESS_ID 1
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define SLEEP_PERIOD_MSEC 10

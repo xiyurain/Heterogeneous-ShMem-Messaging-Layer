@@ -1,50 +1,32 @@
 #include "service.h"
 
-// static void endpoint_register_msg_handler(ringbuf_endpoint *ep,
-// 			int nsp_index, int msg_type, msg_handler handler) {
-// 	if(handler == NULL || msg_type > MAX_MSG_TYPE || msg_type <= 0) {
-// 		return;
-// 	}
-// 	if(nsp_index > MAX_NAMESPACE_NUM || nsp_index < 0){
-// 		return;
-// 	}
-// 	ep->namespaces[nsp_index].msg_handlers[msg_type] = handler;
-// }
+static inline void register_service(service *serv) 
+{
+        list_add_tail(serv->service_list, services);
+}
 
-// static void endpoint_unregister_msg_handler(ringbuf_endpoint *ep, 
-// 					int nsp_index, int msg_type) {
-// 	if(handler == NULL || msg_type > MAX_MSG_TYPE || msg_type <= 0) {
-// 		return;
-// 	}
-// 	if(nsp_index > MAX_NAMESPACE_NUM || nsp_index < 0){
-// 		return;
-// 	}
-// 	ep->namespaces[nsp_index].msg_handlers[msg_type] = NULL;
-// }
+static inline void unregister_service(service *serv) 
+{
+        list_del(serv->service_list);
+}
 
-// static ringbuf_socket* endpoint_create_socket(ringbuf_endpoint *ep, 
-// 					int nsp_index, char *socket_name) {
-// 	int i;
-// 	ringbuf_socket *socket;
-// 	unsigned long buffer_offset;
+static void register_message(service *serv, int msg_type, msg_handler)
+{
+        if(handler == NULL || msg_type > MAX_MSG_TYPE || msg_type <= 0)
+		return;
+        serv->msg_handlers[msg_type] = msg_handler;
+}
 
-// 	for(i = 0; i < MAX_SOCKET_NUM; i++) {
-// 		if(ep->sockets[i].in_use == FALSE)
-// 			break;
-// 	}
-// 	socket = ep->sockets + i;
+static void unregister_message(service *serv, int msg_type);
+{
+        if(msg_type > MAX_MSG_TYPE || msg_type <= 0)
+		return;
+        serv->msg_handlers[msg_type] = NULL;
+}
 
-// 	socket->in_use = TRUE;
-// 	socket->belongs_endpoint = ep;
-// 	strcpy(socket->name, socket_name);
-// 	socket->namespace_index = nsp_index;
-// 	socket->listening = FALSE;
-	
-// 	socket->sync_toggle = 0;
-// 	if(ep->role == Host) {
-// 		buffer_offset = endpoint_add_payload(ep, sizeof(struct pcie_buffer));
-// 		socket_bind(socket, ep->device->base_addr + buffer_offset, ep->role);
-// 	}
-	
-// 	return socket;
-// }
+static void handle_message(service *serv, 
+                        ringbuf_socket *sock, rbmsg_hd *hd)
+{
+        msg_handler handler = serv->msg_handlers[hd->msg_type];
+        handler(sock, hd);
+}
